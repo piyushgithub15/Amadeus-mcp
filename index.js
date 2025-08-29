@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
-// MCP stdio server (JavaScript ESM) to forward Amadeus API requests.
+// MCP stdio server (JavaScript CommonJS) to forward Amadeus API requests.
 // Node 18+ recommended.
 //
 // npm i @modelcontextprotocol/sdk axios zod
+const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
+const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
+const axios = require("axios");
+const dotenv = require("dotenv");
+const { z } = require("zod");
 
-import axios from "axios";
-import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+// Load environment variables
+dotenv.config();
 
 const AMADEUS_TOKEN_PATH = "/v1/security/oauth2/token";
 
@@ -100,6 +103,16 @@ async function getAmadeusToken({ apiKey, apiSecret, serviceName, timeoutMs = 100
   }
 }
 
+function getEnvAuth() {
+  const serviceName = process.env.AMADEUS_SERVICE_NAME || process.env.AMADEUS_ENV || "test";
+  const apiKey = process.env.AMADEUS_API_KEY;
+  const apiSecret = process.env.AMADEUS_API_SECRET;
+  if (!apiKey || !apiSecret) {
+    throw new Error("Missing AMADEUS_API_KEY or AMADEUS_API_SECRET in environment");
+  }
+  return { serviceName, apiKey, apiSecret };
+}
+
 async function forwardAmadeus({
   serviceName,
   apiKey,
@@ -127,51 +140,6 @@ async function forwardAmadeus({
   const payload = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
   return { payload, isError: response.status >= 400 };
 }
-
-function schemaWithParams(extraProps = {}, extraRequired = []) {
-  return {
-    type: "object",
-    additionalProperties: true,
-    properties: {
-      serviceName: { type: "string", minLength: 2 },
-      apiKey: { type: "string", minLength: 1 },
-      apiSecret: { type: "string", minLength: 1 },
-      method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-      query: { type: "object" },
-      body: {},
-      headers: { type: "object" },
-      contentType: { type: "string" },
-      timeoutMs: { type: "integer", minimum: 1, maximum: 60000 },
-      ...extraProps,
-    },
-    required: ["serviceName", "apiKey", "apiSecret", "method", ...extraRequired],
-  };
-}
-
-// ---- MCP server ----
-const server = new McpServer({
-  name: "amadeus-proxy-mcp",
-  version: "1.0.0",
-});
-
-const RequestSchema = {
-  serviceName: z.string().min(2, "serviceName is required"),
-  apiKey: z.string().min(1, "apiKey is required"),
-  apiSecret: z.string().min(1, "apiSecret is required"),
-  query: z.record(z.string(), z.any()).default({}),
-  body: z.any().optional(),
-  headers: z
-    .record(z.string(), z.string())
-    .default({})
-    .refine((h) => {
-      const lower = {};
-      for (const k of Object.keys(h)) lower[k.toLowerCase()] = h[k];
-      return !("authorization" in lower);
-    }, "Do not send Authorization; it will be set by the server."),
-  contentType: z.string().default("application/json"),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
-}
-
 
 function ensureString(val, name) {
   if (typeof val !== "string" || val.trim() === "") {
@@ -207,26 +175,6 @@ function normalizeBase(input) {
 }
 
 
-function simpleSchema(extraProps = {}, extraRequired = []) {
-  return {
-    serviceName: z.string().min(2, "serviceName is required"),
-    apiKey: z.string().min(1, "apiKey is required"),
-    apiSecret: z.string().min(1, "apiSecret is required"),
-    query: z.record(z.string(), z.any()).default({}),
-    body: z.any().optional(),
-    headers: z
-      .record(z.string(), z.string())
-      .default({})
-      .refine((h) => {
-        const lower = {};
-        for (const k of Object.keys(h)) lower[k.toLowerCase()] = h[k];
-        return !("authorization" in lower);
-      }, "Do not send Authorization; it will be set by the server."),
-    contentType: z.string().default("application/json"),
-    timeoutMs: z.number().int().positive().max(60000).default(15000),
-  };
-}
-
 function idProp(name) {
   const props = {};
   props[name] = { type: "string", minLength: 1 };
@@ -234,114 +182,138 @@ function idProp(name) {
 }
 
 
-server.registerTool(
-  "amadeus.request",
-  {
-    title: "Forward an Amadeus API request",
-    description:
-      "Authenticates with Amadeus (OAuth2 client credentials) and forwards an HTTP request to a whitelisted Amadeus REST path.",
-    inputSchema: RequestSchema,
-  },
-  async (input) => {
-    const {
-      serviceName,
-      apiKey,
-      apiSecret,
-      method,
-      path,
-      query,
-      body,
-      headers,
-      contentType,
-      timeoutMs,
-    } = RequestSchema.parse(input);
 
-    const baseUrl = `https://${serviceName}.api.amadeus.com`;
-    const token = await getAmadeusToken({ apiKey, apiSecret, serviceName, timeoutMs });
-    const url = `${baseUrl}${path}`;
 
-    try {
-      const response = await axios.request({
-        method,
-        url,
-        params: query,
-        data: body,
-        headers: {
-          ...headers,
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-        },
-        timeout: timeoutMs,
-        maxRedirects: 3,
-        validateStatus: () => true, // surface 4xx/5xx in content
-      });
-
-      const payload =
-        typeof response.data === "string"
-          ? response.data
-          : JSON.stringify(response.data);
-
-      return {
-        content: [{ type: "text", text: payload }],
-        isError: response.status >= 400,
-      };
-    } catch (e) {
-      const status = e?.response?.status ?? 500;
-      const data = e?.response?.data ?? { error: e?.message || "Unknown error" };
-      const text = typeof data === "string" ? data : JSON.stringify(data);
-      return {
-        content: [{ type: "text", text: `Forwarding error (${status}): ${text}` }],
-        isError: true,
-      };
-    }
-  }
-);
+// ---- MCP server ----
+const server = new McpServer({
+  name: "amadeus-proxy-mcp",
+  version: "1.0.0",
+});
 
 /** *******************************
  * FLIGHTS: SEARCH, DATES, PRICING
  **********************************/
 
 // /v2/shopping/flight-offers (GET)
+// Schema based on Postman collection examples
+const FlightOffersSearchSchema = {
+  originLocationCode: z.string(),
+  destinationLocationCode: z.string(),
+  departureDate: z.string(), // YYYY-MM-DD
+  returnDate: z.string().optional(),
+  adults: z.union([z.number(), z.string()]),
+  children: z.union([z.number(), z.string()]).optional(),
+  infants: z.union([z.number(), z.string()]).optional(),
+  travelClass: z.string().optional(),
+  includedAirlineCodes: z.string().optional(),
+  excludedAirlineCodes: z.string().optional(),
+  nonStop: z.union([z.boolean(), z.string()]).optional(),
+  currencyCode: z.string().optional(),
+  max: z.union([z.number(), z.string()]).optional(),
+  viewBy: z.enum(["DATE", "DURATION"]).optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v2.shopping.flight-offers",
   {
     title: "Amadeus: Flight Offers Search",
     description: "Search for available flight offers.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightOffersSearchSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v2/shopping/flight-offers" });
+    const { timeoutMs, ...query } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v2/shopping/flight-offers",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/shopping/flight-dates (GET)
+const FlightDatesSchema = {
+  originLocationCode: z.string(),
+  destinationLocationCode: z.string(),
+  departureDate: z.string().optional(), // YYYY-MM-DD or range "YYYY-MM-DD,YYYY-MM-DD"
+  oneWay: z.union([z.boolean(), z.string()]).optional(),
+  duration: z.union([z.number(), z.string()]).optional(),
+  nonStop: z.union([z.boolean(), z.string()]).optional(),
+  viewBy: z.enum(["DATE","DURATION"]).optional(),
+  currencyCode: z.string().optional(),
+  max: z.union([z.number(), z.string()]).optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+}
+
 server.registerTool(
   "amadeus.v1.shopping.flight-dates",
   {
     title: "Amadeus: Flight Dates",
     description: "Search for the cheapest flight dates.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightDatesSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/shopping/flight-dates" });
+    const { timeoutMs, ...query } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/shopping/flight-dates",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/shopping/flight-offers/pricing (POST)
+const FlightOffersPricingSchema = {
+  flightOffers: z.array(z.any()), // array of flight offers from search response
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+}
+
 server.registerTool(
   "amadeus.v1.shopping.flight-offers.pricing",
   {
     title: "Amadeus: Flight Offers Pricing",
     description: "Confirm pricing of a flight offer.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightOffersPricingSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/shopping/flight-offers/pricing" });
+    const { timeoutMs, flightOffers } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const body = {
+      data: {
+        type: "flight-offers-pricing",
+        flightOffers: Array.isArray(flightOffers) ? flightOffers : [flightOffers],
+      },
+    };
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/shopping/flight-offers/pricing",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -352,33 +324,78 @@ server.registerTool(
  **********************************/
 
 // /v1/booking/flight-orders (POST)
+const FlightOrderCreateSchema = {
+  flightOffers: z.array(z.any()), // array of flight offers from search/pricing response
+  travelers: z.array(z.any()), // array of travelers with personal details
+  remarks: z.any().optional(),
+  ticketingAgreement: z.any().optional(),
+  contacts: z.any().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.booking.flight-orders",
   {
     title: "Amadeus: Flight Orders",
     description: "Create a new flight booking order.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightOrderCreateSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/booking/flight-orders" });
+    const { timeoutMs, flightOffers, travelers, remarks, ticketingAgreement, contacts } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const body = {
+      data: {
+        type: "flight-order",
+        flightOffers,
+        travelers,
+        ...(remarks ? { remarks } : {}),
+        ...(ticketingAgreement ? { ticketingAgreement } : {}),
+        ...(contacts ? { contacts } : {}),
+      },
+    };
+
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/booking/flight-orders",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/booking/flight-orders/:flightOrderId (GET)
+const FlightOrderByIdSchema = { flightOrderId: z.string().min(1), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.booking.flight-orders.by-id",
   {
     title: "Amadeus: Flight Order by ID",
     description: "Retrieve a specific flight booking order by ID.",
-    inputSchema: simpleSchema(idProp("flightOrderId"), ["flightOrderId"]),
+    inputSchema: FlightOrderByIdSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const flightOrderId = ensureString(input.flightOrderId, "flightOrderId");
+    const { timeoutMs, flightOrderId } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
     const path = `/v1/booking/flight-orders/${encodeURIComponent(flightOrderId)}`;
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path });
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path,
+      query: {},
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -394,11 +411,48 @@ server.registerTool(
   {
     title: "Amadeus: Seatmaps",
     description: "Get seat maps for a flight offer.",
-    inputSchema: simpleSchema(),
+    inputSchema: {
+      // Either provide flight-orderId for GET seatmaps or provide flight offer(s) to POST
+      flightOrderId: z.string().optional(),
+      flightOffers: z.any().optional(),
+      timeoutMs: z.number().int().positive().max(60000).default(15000),
+    },
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/shopping/seatmaps" });
+    const { timeoutMs, flightOrderId, flightOffers } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    // If flightOrderId is provided, use GET with query param as per collection example
+    if (typeof flightOrderId === "string" && flightOrderId.trim()) {
+      const { payload, isError } = await forwardAmadeus({
+        serviceName,
+        apiKey,
+        apiSecret,
+        method: "GET",
+        path: "/v1/shopping/seatmaps",
+        query: { "flight-orderId": flightOrderId },
+        body: undefined,
+        headers: {},
+        contentType: "application/json",
+        timeoutMs,
+      });
+      return { content: [{ type: "text", text: payload }], isError };
+    }
+
+    // Otherwise expect flightOffers and POST body
+    const flightOffersArray = Array.isArray(flightOffers) ? flightOffers : [flightOffers];
+    const body = { data: flightOffersArray };
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/shopping/seatmaps",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -409,11 +463,28 @@ server.registerTool(
   {
     title: "Amadeus: Schedules (Flights)",
     description: "Retrieve airline schedules for flights.",
-    inputSchema: simpleSchema(),
+    inputSchema: {
+      carrierCode: z.string(),
+      flightNumber: z.string(),
+      scheduledDepartureDate: z.string(), // YYYY-MM-DD
+      timeoutMs: z.number().int().positive().max(60000).default(15000),
+    },
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v2/schedule/flights" });
+    const { timeoutMs, ...query } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v2/schedule/flights",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -425,76 +496,194 @@ server.registerTool(
  **********************************/
 
 // /v1/travel/predictions/flight-delay (GET)
+const FlightDelayPredictionSchema = {
+  originLocationCode: z.string(),
+  destinationLocationCode: z.string(),
+  departureDate: z.string(), // YYYY-MM-DD
+  departureTime: z.string().optional(), // HH:MM:SS
+  arrivalDate: z.string().optional(), // YYYY-MM-DD
+  arrivalTime: z.string().optional(), // HH:MM:SS
+  aircraftCode: z.string().optional(),
+  carrierCode: z.string().optional(),
+  flightNumber: z.string().optional(),
+  duration: z.string().optional(), // ISO 8601 e.g., PT2H
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.travel.predictions.flight-delay",
   {
     title: "Amadeus: Flight Delay Prediction",
     description: "Predict probability of a flight delay.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightDelayPredictionSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/travel/predictions/flight-delay" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/travel/predictions/flight-delay",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/analytics/itinerary-price-metrics (GET)
+const ItineraryPriceMetricsSchema = {
+  originIataCode: z.string(),
+  destinationIataCode: z.string(),
+  departureDate: z.string(), // YYYY-MM-DD
+  currencyCode: z.string().optional(),
+  oneWay: z.union([z.boolean(), z.string()]).optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.analytics.itinerary-price-metrics",
   {
     title: "Amadeus: Itinerary Price Metrics",
     description: "Get itinerary price metrics.",
-    inputSchema: simpleSchema(),
+    inputSchema: ItineraryPriceMetricsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/analytics/itinerary-price-metrics" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/analytics/itinerary-price-metrics",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/shopping/flight-offers/upselling (POST)
+const FlightOffersUpsellingSchema = {
+  flightOffers: z.any(),
+  payments: z.any().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.shopping.flight-offers.upselling",
   {
     title: "Amadeus: Flight Offers Upselling",
     description: "Find upsell offers for a flight.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightOffersUpsellingSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/shopping/flight-offers/upselling" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, flightOffers, payments } = input;
+    const body = {
+      data: {
+        type: "flight-offers-upselling",
+        flightOffers: Array.isArray(flightOffers) ? flightOffers : [flightOffers],
+        ...(payments ? { payments } : {}),
+      },
+    };
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/shopping/flight-offers/upselling",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
-// /v2/shopping/flight-offers/prediction (POST)
+// Flight Offers Prediction (v2)
+const FlightOffersPredictionSchema = {
+  meta: {
+    count: z.number().optional(),
+    links: {
+      self: z.string().optional()
+    }
+  },
+  flightOffers: z.array(z.any()), // array of flight offers from search response
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v2.shopping.flight-offers.prediction",
   {
-    title: "Amadeus: Flight Offer Low-Price Prediction",
-    description: "Predict if a flight offer is likely the lowest price.",
-    inputSchema: simpleSchema(),
+    title: "Amadeus: Flight Offers Prediction",
+    description: "Get flight offers prediction based on search results.",
+    inputSchema: FlightOffersPredictionSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v2/shopping/flight-offers/prediction" });
+    const { timeoutMs, meta, flightOffers } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Transform input to correct Amadeus format
+    const body = {
+      data: {
+        meta,
+        data: flightOffers
+      }
+    };
+    
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v2/shopping/flight-offers/prediction",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/travel/predictions/trip-purpose (GET)
+const TripPurposeSchema = { originLocationCode: z.string(), destinationLocationCode: z.string(), departureDate: z.string(), returnDate: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.travel.predictions.trip-purpose",
   {
     title: "Amadeus: Trip Purpose Prediction",
     description: "Predict business vs leisure trip.",
-    inputSchema: simpleSchema(),
+    inputSchema: TripPurposeSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/travel/predictions/trip-purpose" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/travel/predictions/trip-purpose",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -505,31 +694,79 @@ server.registerTool(
  **********************************/
 
 // /v1/shopping/flight-destinations (GET)
+const FlightDestinationsSchema = {
+  origin: z.string(),
+  departureDate: z.string().optional(),
+  oneWay: z.union([z.boolean(), z.string()]).optional(),
+  duration: z.union([z.number(), z.string()]).optional(),
+  nonStop: z.union([z.boolean(), z.string()]).optional(),
+  viewBy: z.enum(["DATE","DURATION"]).optional(),
+  maxPrice: z.union([z.number(), z.string()]).optional(),
+  currencyCode: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.shopping.flight-destinations",
   {
     title: "Amadeus: Flight Destinations",
     description: "Cheapest destinations from an origin.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightDestinationsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/shopping/flight-destinations" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/shopping/flight-destinations",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/shopping/availability/flight-availabilities (POST)
+const FlightAvailabilitiesSchema = {
+  originDestinations: z.any(),
+  travelers: z.any(),
+  sources: z.any().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.shopping.availability.flight-availabilities",
   {
     title: "Amadeus: Flight Availabilities",
     description: "Real-time seat availability.",
-    inputSchema: simpleSchema(),
+    inputSchema: FlightAvailabilitiesSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/shopping/availability/flight-availabilities" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, originDestinations, travelers, sources } = input;
+    const body = {
+      originDestinations,
+      travelers,
+      ...(sources ? { sources } : {}),
+    };
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/shopping/availability/flight-availabilities",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -540,136 +777,294 @@ server.registerTool(
  **********************************/
 
 // /v1/reference-data/recommended-locations (GET)
+const RecommendedLocationsSchema = {
+  cityCodes: z.string(), // comma-separated
+  travelerCountryCode: z.string(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.reference-data.recommended-locations",
   {
     title: "Amadeus: Recommended Locations",
     description: "Recommended locations for a city.",
-    inputSchema: simpleSchema(),
+    inputSchema: RecommendedLocationsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/recommended-locations" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/recommended-locations",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/airport/predictions/on-time (GET)
+const AirportOnTimePredictionSchema = {
+  airportCode: z.string(),
+  date: z.string(), // YYYY-MM-DD
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.airport.predictions.on-time",
   {
     title: "Amadeus: Airport On-Time Prediction",
     description: "Airport on-time performance prediction.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirportOnTimePredictionSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/airport/predictions/on-time" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/airport/predictions/on-time",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations (GET)
+const LocationsSearchSchema = {
+  keyword: z.string().optional(),
+  subType: z.string().optional(), // e.g., CITY,AIRPORT
+  pageLimit: z.union([z.number(), z.string()]).optional(),
+  pageOffset: z.union([z.number(), z.string()]).optional(),
+  include: z.string().optional(),
+  sort: z.string().optional(),
+  view: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.reference-data.locations",
   {
     title: "Amadeus: Locations",
     description: "Search locations (cities/airports).",
-    inputSchema: simpleSchema(),
+    inputSchema: LocationsSearchSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations/CMUC (GET)
+const LocationByIdSchema = { locationId: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
-  "amadeus.v1.reference-data.locations.CMUC",
+  "amadeus.v1.reference-data.locations.by-id",
   {
-    title: "Amadeus: Location by ID (CMUC)",
+    title: "Amadeus: Location by ID",
     description: "Details for a specific location ID.",
-    inputSchema: simpleSchema(),
+    inputSchema: LocationByIdSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/CMUC" });
+    const { timeoutMs, locationId } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const path = `/v1/reference-data/locations/${encodeURIComponent(locationId)}`;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path,
+      query: {},
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations/airports (GET)
+const AirportsByLocationSchema = { 
+  latitude: z.union([z.number(), z.string()]), 
+  longitude: z.union([z.number(), z.string()]), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.reference-data.locations.airports",
   {
-    title: "Amadeus: Airports by City",
-    description: "Airports serving a city.",
-    inputSchema: simpleSchema(),
+    title: "Amadeus: Airports by Location",
+    description: "Find airports near a specific latitude/longitude location.",
+    inputSchema: AirportsByLocationSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/airports" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, latitude, longitude } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations/airports",
+      query: { latitude, longitude },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/airport/direct-destinations (GET)
+const AirportDirectDestinationsSchema = { 
+  departureAirportCode: z.string(), 
+  max: z.union([z.number(), z.string()]).optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.airport.direct-destinations",
   {
     title: "Amadeus: Airport Direct Destinations",
     description: "Direct destinations from an airport.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirportDirectDestinationsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/airport/direct-destinations" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, departureAirportCode } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/airport/direct-destinations",
+      query: { departureAirportCode },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v2/reference-data/urls/checkin-links (GET)
+const CheckinLinksSchema = { airlineCode: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v2.reference-data.urls.checkin-links",
   {
     title: "Amadeus: Airline Check-in Links",
     description: "Airline check-in links.",
-    inputSchema: simpleSchema(),
+    inputSchema: CheckinLinksSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v2/reference-data/urls/checkin-links" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, airlineCode } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v2/reference-data/urls/checkin-links",
+      query: { airlineCode },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/airlines (GET)
+const AirlinesSchema = { airlineCodes: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.reference-data.airlines",
   {
     title: "Amadeus: Airlines",
     description: "Airline information by code.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirlinesSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/airlines" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, airlineCodes } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/airlines",
+      query: { airlineCodes },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/airline/destinations (GET)
+const AirlineDestinationsSchema = { 
+  airlineCode: z.string(), 
+  max: z.union([z.number(), z.string()]).optional(),
+  includeIndirect: z.union([z.boolean(), z.string()]).optional(), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.airline.destinations",
   {
     title: "Amadeus: Airline Destinations",
     description: "Destinations served by an airline.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirlineDestinationsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/airline/destinations" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, airlineCode, includeIndirect } = input;
+    const query = { airlineCode, ...(includeIndirect !== undefined ? { includeIndirect } : {}) };
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/airline/destinations",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -679,61 +1074,124 @@ server.registerTool(
  **********************************/
 
 // /v1/shopping/activities (GET)
+const ActivitiesSearchSchema = { latitude: z.union([z.number(), z.string()]).optional(), longitude: z.union([z.number(), z.string()]).optional(), radius: z.union([z.number(), z.string()]).optional(), cityCode: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.shopping.activities",
   {
     title: "Amadeus: Activities Search",
     description: "Search activities at a destination.",
-    inputSchema: simpleSchema(),
+    inputSchema: ActivitiesSearchSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/shopping/activities" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/shopping/activities",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/shopping/activities/4615 (GET)
+const ActivityByIdSchema = { activityId: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
-  "amadeus.v1.shopping.activities.4615",
+  "amadeus.v1.shopping.activities.by-id",
   {
-    title: "Amadeus: Activity by ID (4615)",
+    title: "Amadeus: Activity by ID",
     description: "Retrieve a specific activity by ID.",
-    inputSchema: simpleSchema(),
+    inputSchema: ActivityByIdSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/shopping/activities/4615" });
+    const { timeoutMs, activityId } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const path = `/v1/shopping/activities/${encodeURIComponent(activityId)}`;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path,
+      query: {},
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/shopping/activities/by-square (GET)
+const ActivitiesBySquareSchema = { north: z.union([z.number(), z.string()]), south: z.union([z.number(), z.string()]), east: z.union([z.number(), z.string()]), west: z.union([z.number(), z.string()]), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.shopping.activities.by-square",
   {
     title: "Amadeus: Activities by Bounding Box",
     description: "Search activities by geographic bounding box.",
-    inputSchema: simpleSchema(),
+    inputSchema: ActivitiesBySquareSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/shopping/activities/by-square" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/shopping/activities/by-square",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations/cities (GET)
+const CitiesSchema = { 
+  keyword: z.string().optional(), 
+  countryCode: z.string().optional(), 
+  max: z.union([z.number(), z.string()]).optional(),
+  include: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.reference-data.locations.cities",
   {
     title: "Amadeus: Cities",
     description: "Cities information.",
-    inputSchema: simpleSchema(),
+    inputSchema: CitiesSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/cities" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations/cities",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -743,48 +1201,199 @@ server.registerTool(
  **********************************/
 
 // /v1/shopping/transfer-offers (GET)
+const TransferOffersSchema = {
+  // follow the collection: POST with body
+  startLocationCode: z.string().optional(),
+  endAddressLine: z.string().optional(),
+  endCityName: z.string().optional(),
+  endZipCode: z.string().optional(),
+  endCountryCode: z.string().optional(),
+  endName: z.string().optional(),
+  endGeoCode: z.string().optional(),
+  transferType: z.string().optional(),
+  startDateTime: z.string().optional(),
+  passengers: z.union([z.number(), z.string()]).optional(),
+  stopOvers: z.any().optional(),
+  startConnectedSegment: z.any().optional(),
+  endConnectedSegment: z.any().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.shopping.transfer-offers",
   {
     title: "Amadeus: Transfer Offers",
     description: "Search ground transfer offers.",
-    inputSchema: simpleSchema(),
+    inputSchema: TransferOffersSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/shopping/transfer-offers" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...rest } = input;
+    const body = { ...rest };
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/shopping/transfer-offers",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
-// /v1/ordering/transfer-orders (POST)
+// Transfer Order Create
+const TransferOrderCreateSchema = {
+  offerId: z.string().min(1),
+  note: z.string().optional(),
+  passengers: z.array({
+    firstName: z.string(),
+    lastName: z.string(),
+    title: z.string(),
+    contacts: {
+      phoneNumber: z.string().optional(),
+      email: z.string().optional()
+    },
+    billingAddress: {
+      line: z.string().optional(),
+      zip: z.string().optional(),
+      countryCode: z.string().optional(),
+      cityName: z.string().optional()
+    }
+  }),
+  agency: {
+    contacts: z.array({
+      email: {
+        address: z.string().optional()
+      }
+    })
+  },
+  payment: {
+    methodOfPayment: z.string().optional(),
+    creditCard: {
+      number: z.string().optional(),
+      holderName: z.string().optional(),
+      vendorCode: z.string().optional(),
+      expiryDate: z.string().optional(),
+      cvv: z.string().optional()
+    }
+  },
+  extraServices: z.array({
+    code: z.string().optional(),
+    itemId: z.string().optional()
+  }),
+  equipment: z.array({
+    code: z.string().optional()
+  }),
+  corporation: {
+    address: {
+      line: z.string().optional(),
+      zip: z.string().optional(),
+      countryCode: z.string().optional(),
+      cityName: z.string().optional()
+    },
+    info: {
+      AU: z.string().optional(),
+      CE: z.string().optional()
+    }
+  },
+  startConnectedSegment: {
+    transportationType: z.string().optional(),
+    transportationNumber: z.string().optional(),
+    departure: {
+      uicCode: z.string().optional(),
+      iataCode: z.string().optional(),
+      localDateTime: z.string().optional()
+    },
+    arrival: {
+      uicCode: z.string().optional(),
+      iataCode: z.string().optional(),
+      localDateTime: z.string().optional()
+    }
+  },
+  endConnectedSegment: {
+    transportationType: z.string().optional(),
+    transportationNumber: z.string().optional(),
+    departure: {
+      uicCode: z.string().optional(),
+      iataCode: z.string().optional(),
+      localDateTime: z.string().optional()
+    },
+    arrival: {
+      uicCode: z.string().optional(),
+      iataCode: z.string().optional(),
+      localDateTime: z.string().optional()
+    }
+  },
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.ordering.transfer-orders",
   {
-    title: "Amadeus: Transfer Orders",
-    description: "Book a ground transfer order.",
-    inputSchema: simpleSchema(),
+    title: "Amadeus: Transfer Order Create",
+    description: "Create a new transfer order.",
+    inputSchema: TransferOrderCreateSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/ordering/transfer-orders" });
+    const { timeoutMs, offerId, ...transferData } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Transform input to correct Amadeus format
+    const body = {
+      data: transferData
+    };
+    
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: `/v1/ordering/transfer-orders?offerId=${encodeURIComponent(offerId)}`,
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/ordering/transfer-orders/:transferOrderId/transfers/cancellation (POST)
+const TransferOrderCancellationSchema = { 
+  transferOrderId: z.string().min(1), 
+  confirmNbr: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.ordering.transfer-orders.cancellation",
   {
     title: "Amadeus: Cancel Transfer Order",
     description: "Cancel a transfer order.",
-    inputSchema: simpleSchema(idProp("transferOrderId"), ["transferOrderId"]),
+    inputSchema: TransferOrderCancellationSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const transferOrderId = ensureString(input.transferOrderId, "transferOrderId");
+    const { timeoutMs, transferOrderId, confirmNbr } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
     const path = `/v1/ordering/transfer-orders/${encodeURIComponent(transferOrderId)}/transfers/cancellation`;
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path });
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path,
+      query: { ...(confirmNbr ? { confirmNbr } : {}) },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -794,46 +1403,104 @@ server.registerTool(
  **********************************/
 
 // /v1/travel/analytics/air-traffic/traveled (GET)
+const AirTrafficTraveledSchema = { 
+  originCityCode: z.string(), 
+  period: z.string(), 
+  sort: z.string().optional(),
+  max: z.union([z.number(), z.string()]).optional(),
+  direction: z.string().optional(), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.travel.analytics.air-traffic.traveled",
   {
     title: "Amadeus: Air Traffic (Traveled)",
     description: "Air traffic analytics: traveled.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirTrafficTraveledSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/travel/analytics/air-traffic/traveled" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/travel/analytics/air-traffic/traveled",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/travel/analytics/air-traffic/booked (GET)
+const AirTrafficBookedSchema = { 
+  originCityCode: z.string(), 
+  period: z.string(), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.travel.analytics.air-traffic.booked",
   {
     title: "Amadeus: Air Traffic (Booked)",
     description: "Air traffic analytics: booked.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirTrafficBookedSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/travel/analytics/air-traffic/booked" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/travel/analytics/air-traffic/booked",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/travel/analytics/air-traffic/busiest-period (GET)
+const AirTrafficBusiestPeriodSchema = { 
+  cityCode: z.string().optional(), 
+  period: z.string(), 
+  direction: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.travel.analytics.air-traffic.busiest-period",
   {
     title: "Amadeus: Air Traffic (Busiest Period)",
     description: "Busiest travel period analytics.",
-    inputSchema: simpleSchema(),
+    inputSchema: AirTrafficBusiestPeriodSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/travel/analytics/air-traffic/busiest-period" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/travel/analytics/air-traffic/busiest-period",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
@@ -843,138 +1510,353 @@ server.registerTool(
  **********************************/
 
 // /v1/reference-data/locations/hotels/by-city (GET)
+const HotelsByCitySchema = { cityCode: z.string(), radius: z.union([z.number(), z.string()]).optional(), radiusUnit: z.string().optional(), chainCodes: z.string().optional(), amenities: z.string().optional(), ratings: z.string().optional(), hotelSource: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotels.by-city",
   {
     title: "Amadeus: Hotels by City",
     description: "List hotels by city.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelsByCitySchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/hotels/by-city" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations/hotels/by-city",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v3/shopping/hotel-offers (GET)
+const HotelOffersSearchSchema = { hotelIds: z.string().optional(), cityCode: z.string().optional(), latitude: z.union([z.number(), z.string()]).optional(), longitude: z.union([z.number(), z.string()]).optional(), radius: z.union([z.number(), z.string()]).optional(), radiusUnit: z.string().optional(), checkInDate: z.string().optional(), checkOutDate: z.string().optional(), adults: z.union([z.number(), z.string()]).optional(), roomQuantity: z.union([z.number(), z.string()]).optional(), priceRange: z.string().optional(), currency: z.string().optional(), paymentPolicy: z.string().optional(), includeClosed: z.union([z.boolean(), z.string()]).optional(), bestRateOnly: z.union([z.boolean(), z.string()]).optional(), boardType: z.string().optional(), amenities: z.string().optional(), ratings: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v3.shopping.hotel-offers",
   {
     title: "Amadeus: Hotel Offers",
     description: "Search hotel offers.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelOffersSearchSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v3/shopping/hotel-offers" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v3/shopping/hotel-offers",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/booking/hotel-bookings (POST)
+const HotelBookingSchema = {
+  offerId: z.string(),
+  guests: z.array({
+    id: z.number(),
+    name: {
+      title: z.string(),
+      firstName: z.string(),
+      lastName: z.string()
+    },
+    contact: {
+      phone: z.string().optional(),
+      email: z.string().optional()
+    }
+  }),
+  payments: z.array({
+    id: z.number(),
+    method: z.string(),
+    card: {
+      vendorCode: z.string(),
+      cardNumber: z.string(),
+      expiryDate: z.string()
+    }
+  }),
+  rooms: z.array({
+    guestIds: z.array(z.number()),
+    paymentId: z.number(),
+    specialRequest: z.string().optional()
+  }),
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v1.booking.hotel-bookings",
   {
-    title: "Amadeus: Hotel Bookings",
-    description: "Book a hotel.",
-    inputSchema: simpleSchema(),
+    title: "Amadeus: Hotel Booking",
+    description: "Book a hotel room.",
+    inputSchema: HotelBookingSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v1/booking/hotel-bookings" });
+    const { timeoutMs, offerId, guests, payments, rooms } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Transform input to correct Amadeus format
+    const body = {
+      data: {
+        offerId,
+        guests,
+        payments,
+        rooms
+      }
+    };
+    
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v1/booking/hotel-bookings",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations/hotels/by-hotels (GET)
+const HotelsByIdsSchema = { hotelIds: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotels.by-hotels",
   {
     title: "Amadeus: Hotels by IDs",
     description: "Hotel details by IDs.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelsByIdsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/hotels/by-hotels" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, hotelIds } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations/hotels/by-hotels",
+      query: { hotelIds },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations/hotels/by-geocode (GET)
+const HotelsByGeocodeSchema = { latitude: z.union([z.number(), z.string()]), longitude: z.union([z.number(), z.string()]), radius: z.union([z.number(), z.string()]).optional(), radiusUnit: z.string().optional(), hotelSource: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotels.by-geocode",
   {
     title: "Amadeus: Hotels by Geocode",
     description: "Hotels near coordinates.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelsByGeocodeSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/hotels/by-geocode" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations/hotels/by-geocode",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v3/shopping/hotel-offers/:hotelOfferId (GET)
+const HotelOfferByIdSchema = { hotelOfferId: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v3.shopping.hotel-offers.by-id",
   {
     title: "Amadeus: Hotel Offer by ID",
     description: "Retrieve a specific hotel offer by ID.",
-    inputSchema: simpleSchema(idProp("hotelOfferId"), ["hotelOfferId"]),
+    inputSchema: HotelOfferByIdSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const hotelOfferId = ensureString(input.hotelOfferId, "hotelOfferId");
+    const { timeoutMs, hotelOfferId } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
     const path = `/v3/shopping/hotel-offers/${encodeURIComponent(hotelOfferId)}`;
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path });
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path,
+      query: {},
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
-// /v2/booking/hotel-orders (POST)
+// Hotel Orders
+const HotelOrdersSchema = {
+  type: z.string(),
+  guests: z.array({
+    tid: z.number(),
+    title: z.string(),
+    firstName: z.string(),
+    lastName: z.string(),
+    phone: z.string().optional(),
+    email: z.string().optional()
+  }),
+  travelAgent: {
+    contact: {
+      email: z.string().optional()
+    }
+  },
+  roomAssociations: z.array({
+    guestReferences: z.array({
+      guestReference: z.string()
+    }),
+    hotelOfferId: z.string()
+  }),
+  payment: {
+    method: z.string(),
+    paymentCard: {
+      paymentCardInfo: {
+        vendorCode: z.string(),
+        cardNumber: z.string(),
+        expiryDate: z.string(),
+        holderName: z.string()
+      }
+    }
+  },
+  timeoutMs: z.number().int().positive().max(60000).default(15000),
+};
+
 server.registerTool(
   "amadeus.v2.booking.hotel-orders",
   {
     title: "Amadeus: Hotel Orders",
     description: "Create/manage a hotel order.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelOrdersSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "POST", path: "/v2/booking/hotel-orders" });
+    const { timeoutMs, type, guests, travelAgent, roomAssociations, payment } = input;
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Transform input to correct Amadeus format
+    const body = {
+      data: {
+        type,
+        guests,
+        travelAgent,
+        roomAssociations,
+        payment
+      }
+    };
+    
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "POST",
+      path: "/v2/booking/hotel-orders",
+      query: {},
+      body,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v2/e-reputation/hotel-sentiments (GET)
+const HotelSentimentsSchema = { hotelIds: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+
 server.registerTool(
   "amadeus.v2.e-reputation.hotel-sentiments",
   {
     title: "Amadeus: Hotel Sentiments",
     description: "Hotel review sentiment analysis.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelSentimentsSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v2/e-reputation/hotel-sentiments" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, hotelIds } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v2/e-reputation/hotel-sentiments",
+      query: { hotelIds },
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
 
 // /v1/reference-data/locations/hotel (GET)
+const HotelLocationSchema = { 
+  keyword: z.string().optional(), 
+  hotelId: z.string().optional(),
+  subType: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+};
+
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotel",
   {
     title: "Amadeus: Hotel Location",
     description: "Hotel location details.",
-    inputSchema: simpleSchema(),
+    inputSchema: HotelLocationSchema,
   },
   async (input) => {
-    const args = normalizeBase(input);
-    const { payload, isError } = await forwardAmadeus({ ...args, method: "GET", path: "/v1/reference-data/locations/hotel" });
+    const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    const { timeoutMs, ...query } = input;
+    const { payload, isError } = await forwardAmadeus({
+      serviceName,
+      apiKey,
+      apiSecret,
+      method: "GET",
+      path: "/v1/reference-data/locations/hotel",
+      query,
+      body: undefined,
+      headers: {},
+      contentType: "application/json",
+      timeoutMs,
+    });
     return { content: [{ type: "text", text: payload }], isError };
   }
 );
