@@ -106,7 +106,7 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-const RequestSchema = z.object({
+const RequestSchema = {
   serviceName: z.string().min(2, "serviceName is required"),
   apiKey: z.string().min(1, "apiKey is required"),
   apiSecret: z.string().min(1, "apiSecret is required"),
@@ -132,7 +132,7 @@ const RequestSchema = z.object({
     }, "Do not send Authorization; it will be set by the server."),
   contentType: z.string().default("application/json"),
   timeoutMs: z.number().int().positive().max(60000).default(15000),
-});
+}
 
 server.registerTool(
   "amadeus.request",
