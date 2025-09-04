@@ -695,13 +695,13 @@ server.registerTool(
 
 // /v1/shopping/flight-destinations (GET)
 const FlightDestinationsSchema = {
-  origin: z.string(),
-  departureDate: z.string().optional(),
-  oneWay: z.union([z.boolean(), z.string()]).optional(),
-  duration: z.union([z.number(), z.string()]).optional(),
-  nonStop: z.union([z.boolean(), z.string()]).optional(),
-  viewBy: z.enum(["DATE","DURATION"]).optional(),
-  maxPrice: z.union([z.number(), z.string()]).optional(),
+  origin: z.string(), // IATA code of departure city/airport (required)
+  departureDate: z.string().optional(), // YYYY-MM-DD format
+  oneWay: z.boolean().optional(),
+  duration: z.number().optional(),
+  nonStop: z.boolean().optional(),
+  viewBy: z.enum(["DATE", "DURATION"]).optional(),
+  maxPrice: z.number().optional(),
   currencyCode: z.string().optional(),
   timeoutMs: z.number().int().positive().max(60000).default(15000),
 };
@@ -710,7 +710,7 @@ server.registerTool(
   "amadeus.v1.shopping.flight-destinations",
   {
     title: "Amadeus: Flight Destinations",
-    description: "Cheapest destinations from an origin.",
+    description: "Find the cheapest flight destinations from a specific origin with flexible search criteria including dates, duration, price limits, and viewing options.",
     inputSchema: FlightDestinationsSchema,
   },
   async (input) => {
@@ -734,9 +734,56 @@ server.registerTool(
 
 // /v1/shopping/availability/flight-availabilities (POST)
 const FlightAvailabilitiesSchema = {
-  originDestinations: z.any(),
-  travelers: z.any(),
-  sources: z.any().optional(),
+  // Origin Destination fields
+  originDestinationId: z.string().optional(),
+  originLocationCode: z.string().optional(),
+  destinationLocationCode: z.string().optional(),
+  departureDate: z.string().optional(), // YYYY-MM-DD format
+  departureTime: z.string().optional(), // HH:MM:SS format
+  arrivalDate: z.string().optional(), // YYYY-MM-DD format
+  arrivalTime: z.string().optional(), // HH:MM:SS format
+  
+  // Traveler fields
+  travelerId: z.string().optional(),
+  travelerType: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  
+  // Additional traveler fields for multiple travelers
+  travelerId2: z.string().optional(),
+  travelerType2: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId3: z.string().optional(),
+  travelerType3: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId4: z.string().optional(),
+  travelerType4: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId5: z.string().optional(),
+  travelerType5: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId6: z.string().optional(),
+  travelerType6: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId7: z.string().optional(),
+  travelerType7: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId8: z.string().optional(),
+  travelerType8: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  travelerId9: z.string().optional(),
+  travelerType9: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  
+  // Additional origin destination fields for multiple routes
+  originDestinationId2: z.string().optional(),
+  originLocationCode2: z.string().optional(),
+  destinationLocationCode2: z.string().optional(),
+  departureDate2: z.string().optional(),
+  departureTime2: z.string().optional(),
+  arrivalDate2: z.string().optional(),
+  arrivalTime2: z.string().optional(),
+  
+  // API configuration
+  sources: z.array(z.enum(["GDS", "LCC"])).optional(),
+  currencyCode: z.string().optional(),
+  maxFlightOffers: z.number().int().positive().optional(),
+  excludedCarrierCodes: z.array(z.string()).optional(),
+  includedCarrierCodes: z.array(z.string()).optional(),
+  nonStopPreferred: z.boolean().optional(),
+  airportChangeAllowed: z.boolean().optional(),
+  technicalStopsAllowed: z.boolean().optional(),
+  maxNumberOfConnections: z.number().int().min(0).optional(),
   timeoutMs: z.number().int().positive().max(60000).default(15000),
 };
 
@@ -744,17 +791,189 @@ server.registerTool(
   "amadeus.v1.shopping.availability.flight-availabilities",
   {
     title: "Amadeus: Flight Availabilities",
-    description: "Real-time seat availability.",
+    description: "Search for real-time flight availability with detailed search criteria including origin/destination, travelers, and filtering options.",
     inputSchema: FlightAvailabilitiesSchema,
   },
   async (input) => {
     const { serviceName, apiKey, apiSecret } = getEnvAuth();
-    const { timeoutMs, originDestinations, travelers, sources } = input;
+    const { 
+      timeoutMs, 
+      // Origin destination fields
+      originDestinationId,
+      originLocationCode,
+      destinationLocationCode,
+      departureDate,
+      departureTime,
+      arrivalDate,
+      arrivalTime,
+      // Second origin destination fields
+      originDestinationId2,
+      originLocationCode2,
+      destinationLocationCode2,
+      departureDate2,
+      departureTime2,
+      arrivalDate2,
+      arrivalTime2,
+      // Traveler fields
+      travelerId,
+      travelerType,
+      travelerId2,
+      travelerType2,
+      travelerId3,
+      travelerType3,
+      travelerId4,
+      travelerType4,
+      travelerId5,
+      travelerType5,
+      travelerId6,
+      travelerType6,
+      travelerId7,
+      travelerType7,
+      travelerId8,
+      travelerType8,
+      travelerId9,
+      travelerType9,
+      // API configuration
+      sources, 
+      currencyCode,
+      maxFlightOffers,
+      excludedCarrierCodes,
+      includedCarrierCodes,
+      nonStopPreferred,
+      airportChangeAllowed,
+      technicalStopsAllowed,
+      maxNumberOfConnections
+    } = input;
+    
+    // Build originDestinations array
+    const originDestinations = [];
+    
+    // First origin destination
+    if (originLocationCode && destinationLocationCode) {
+      const od = {
+        id: originDestinationId || "1",
+        originLocationCode,
+        destinationLocationCode
+      };
+      
+      if (departureDate) {
+        od.departureDateTime = {
+          date: departureDate,
+          ...(departureTime ? { time: departureTime } : {})
+        };
+      }
+      
+      if (arrivalDate) {
+        od.arrivalDateTime = {
+          date: arrivalDate,
+          ...(arrivalTime ? { time: arrivalTime } : {})
+        };
+      }
+      
+      originDestinations.push(od);
+    }
+    
+    // Second origin destination
+    if (originLocationCode2 && destinationLocationCode2) {
+      const od2 = {
+        id: originDestinationId2 || "2",
+        originLocationCode: originLocationCode2,
+        destinationLocationCode: destinationLocationCode2
+      };
+      
+      if (departureDate2) {
+        od2.departureDateTime = {
+          date: departureDate2,
+          ...(departureTime2 ? { time: departureTime2 } : {})
+        };
+      }
+      
+      if (arrivalDate2) {
+        od2.arrivalDateTime = {
+          date: arrivalDate2,
+          ...(arrivalTime2 ? { time: arrivalTime2 } : {})
+        };
+      }
+      
+      originDestinations.push(od2);
+    }
+    
+    // Build travelers array
+    const travelers = [];
+    const travelerFields = [
+      { id: travelerId, type: travelerType },
+      { id: travelerId2, type: travelerType2 },
+      { id: travelerId3, type: travelerType3 },
+      { id: travelerId4, type: travelerType4 },
+      { id: travelerId5, type: travelerType5 },
+      { id: travelerId6, type: travelerType6 },
+      { id: travelerId7, type: travelerType7 },
+      { id: travelerId8, type: travelerType8 },
+      { id: travelerId9, type: travelerType9 }
+    ];
+    
+    travelerFields.forEach((traveler, index) => {
+      if (traveler.id && traveler.type) {
+        travelers.push({
+          id: traveler.id,
+          travelerType: traveler.type
+        });
+      }
+    });
+    
+    // Transform flat structure to correct API payload structure
     const body = {
       originDestinations,
       travelers,
       ...(sources ? { sources } : {}),
+      ...(currencyCode ? { currencyCode } : {}),
     };
+
+    // Build searchCriteria if any search parameters are provided
+    const searchCriteria = {};
+    if (maxFlightOffers) {
+      searchCriteria.maxFlightOffers = maxFlightOffers;
+    }
+
+    // Build flightFilters if any filter parameters are provided
+    const flightFilters = {};
+    const carrierRestrictions = {};
+    const connectionRestrictions = {};
+
+    if (excludedCarrierCodes && excludedCarrierCodes.length > 0) {
+      carrierRestrictions.excludedCarrierCodes = excludedCarrierCodes;
+    }
+    if (includedCarrierCodes && includedCarrierCodes.length > 0) {
+      carrierRestrictions.includedCarrierCodes = includedCarrierCodes;
+    }
+    if (Object.keys(carrierRestrictions).length > 0) {
+      flightFilters.carrierRestrictions = carrierRestrictions;
+    }
+
+    if (nonStopPreferred !== undefined) {
+      connectionRestrictions.nonStopPreferred = nonStopPreferred;
+    }
+    if (airportChangeAllowed !== undefined) {
+      connectionRestrictions.airportChangeAllowed = airportChangeAllowed;
+    }
+    if (technicalStopsAllowed !== undefined) {
+      connectionRestrictions.technicalStopsAllowed = technicalStopsAllowed;
+    }
+    if (maxNumberOfConnections !== undefined) {
+      connectionRestrictions.maxNumberOfConnections = maxNumberOfConnections;
+    }
+    if (Object.keys(connectionRestrictions).length > 0) {
+      flightFilters.connectionRestrictions = connectionRestrictions;
+    }
+
+    if (Object.keys(flightFilters).length > 0) {
+      searchCriteria.flightFilters = flightFilters;
+    }
+
+    if (Object.keys(searchCriteria).length > 0) {
+      body.searchCriteria = searchCriteria;
+    }
+    
     const { payload, isError } = await forwardAmadeus({
       serviceName,
       apiKey,
@@ -846,11 +1065,9 @@ server.registerTool(
 const LocationsSearchSchema = {
   keyword: z.string().optional(),
   subType: z.string().optional(), // e.g., CITY,AIRPORT
-  pageLimit: z.union([z.number(), z.string()]).optional(),
-  pageOffset: z.union([z.number(), z.string()]).optional(),
-  include: z.string().optional(),
-  sort: z.string().optional(),
-  view: z.string().optional(),
+  countryCode: z.string().optional(), // ISO 3166-1 alpha-2 country code
+  sort: z.string().optional(), // Sort by traveler traffic
+  view: z.string().optional(), // LIGHT or FULL
   timeoutMs: z.number().int().positive().max(60000).default(15000),
 };
 
@@ -858,7 +1075,7 @@ server.registerTool(
   "amadeus.v1.reference-data.locations",
   {
     title: "Amadeus: Locations",
-    description: "Search locations (cities/airports).",
+    description: "Search for cities and airports based on keyword, with optional filtering by country and sorting by traveler traffic.",
     inputSchema: LocationsSearchSchema,
   },
   async (input) => {
