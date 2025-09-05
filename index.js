@@ -14,6 +14,8 @@ dotenv.config();
 
 const AMADEUS_TOKEN_PATH = "/v1/security/oauth2/token";
 
+// ---- Helper Functions ----
+
 // ---- Allowlist (parity with your Express routes) ----
 const ALLOWED_PATHS = new Set([
   "/v2/shopping/flight-offers",
@@ -197,21 +199,30 @@ const server = new McpServer({
 // /v2/shopping/flight-offers (GET)
 // Schema based on Postman collection examples
 const FlightOffersSearchSchema = {
-  originLocationCode: z.string(),
-  destinationLocationCode: z.string(),
-  departureDate: z.string(), // YYYY-MM-DD
-  returnDate: z.string().optional(),
-  adults: z.union([z.number(), z.string()]),
-  children: z.union([z.number(), z.string()]).optional(),
-  infants: z.union([z.number(), z.string()]).optional(),
-  travelClass: z.string().optional(),
-  includedAirlineCodes: z.string().optional(),
-  excludedAirlineCodes: z.string().optional(),
-  nonStop: z.union([z.boolean(), z.string()]).optional(),
-  currencyCode: z.string().optional(),
-  max: z.union([z.number(), z.string()]).optional(),
-  viewBy: z.enum(["DATE", "DURATION"]).optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Core search parameters
+  originLocationCode: z.string().describe("IATA code of the departure airport or city (e.g., 'NYC', 'LAX'). Required for flight search."),
+  destinationLocationCode: z.string().describe("IATA code of the arrival airport or city (e.g., 'LHR', 'CDG'). Required for flight search."),
+  departureDate: z.string().describe("Departure date in YYYY-MM-DD format. Required for flight search."),
+  returnDate: z.string().optional().describe("Return date in YYYY-MM-DD format. Optional for round-trip searches."),
+  
+  // Passenger counts
+  adults: z.number().describe("Number of adult passengers (12+ years). Required parameter for booking."),
+  children: z.number().optional().describe("Number of child passengers (2-11 years). Optional parameter."),
+  infants: z.number().optional().describe("Number of infant passengers (0-1 years). Optional parameter."),
+  
+  // Flight preferences
+  travelClass: z.string().optional().describe("Travel class preference: 'ECONOMY', 'PREMIUM_ECONOMY', 'BUSINESS', 'FIRST'. Optional parameter."),
+  includedAirlineCodes: z.string().optional().describe("Comma-separated list of airline codes to include in search (e.g., 'BA,AF'). Optional filter."),
+  excludedAirlineCodes: z.string().optional().describe("Comma-separated list of airline codes to exclude from search (e.g., 'UA,DL'). Optional filter."),
+  nonStop: z.boolean().optional().describe("If true, only return non-stop flights. Optional filter for direct flights only."),
+  
+  // Display and pricing options
+  currencyCode: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Optional, defaults to USD."),
+  max: z.number().optional().describe("Maximum number of results to return. Optional limit on search results."),
+  viewBy: z.enum(["DATE", "DURATION"]).optional().describe("Sort results by 'DATE' (chronological) or 'DURATION' (shortest first). Optional sorting."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -242,16 +253,25 @@ server.registerTool(
 
 // /v1/shopping/flight-dates (GET)
 const FlightDatesSchema = {
-  originLocationCode: z.string(),
-  destinationLocationCode: z.string(),
-  departureDate: z.string().optional(), // YYYY-MM-DD or range "YYYY-MM-DD,YYYY-MM-DD"
-  oneWay: z.union([z.boolean(), z.string()]).optional(),
-  duration: z.union([z.number(), z.string()]).optional(),
-  nonStop: z.union([z.boolean(), z.string()]).optional(),
-  viewBy: z.enum(["DATE","DURATION"]).optional(),
-  currencyCode: z.string().optional(),
-  max: z.union([z.number(), z.string()]).optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Core search parameters
+  originLocationCode: z.string().describe("IATA code of the departure airport or city (e.g., 'NYC', 'LAX'). Required for date search."),
+  destinationLocationCode: z.string().describe("IATA code of the arrival airport or city (e.g., 'LHR', 'CDG'). Required for date search."),
+  departureDate: z.string().optional().describe("Departure date in YYYY-MM-DD format or date range as 'YYYY-MM-DD,YYYY-MM-DD'. Optional for flexible date search."),
+  
+  // Trip configuration
+  oneWay: z.boolean().optional().describe("If true, search for one-way flights only. If false or omitted, includes round-trip options."),
+  duration: z.number().optional().describe("Trip duration in days. Used to find return dates for round-trip searches."),
+  
+  // Flight preferences
+  nonStop: z.boolean().optional().describe("If true, only return non-stop flights. Optional filter for direct flights only."),
+  viewBy: z.enum(["DATE","DURATION"]).optional().describe("Sort results by 'DATE' (chronological) or 'DURATION' (shortest first). Optional sorting."),
+  
+  // Display and pricing options
+  currencyCode: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Optional, defaults to USD."),
+  max: z.number().optional().describe("Maximum number of results to return. Optional limit on search results."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 }
 
 server.registerTool(
@@ -282,33 +302,267 @@ server.registerTool(
 
 // /v1/shopping/flight-offers/pricing (POST)
 const FlightOffersPricingSchema = {
-  flightOffers: z.array(z.any()), // array of flight offers from search response
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Flight offer metadata (flattened from nested structure)
+  flightOfferType: z.string().optional().describe("Type of flight offer, typically 'flight-offer'. Used to identify the offer structure."),
+  flightOfferId: z.string().optional().describe("Unique identifier for the flight offer. Used to reference specific offers."),
+  flightOfferSource: z.string().optional().describe("Source of the flight offer (e.g., 'GDS', 'LCC'). Indicates where the offer originated."),
+  instantTicketingRequired: z.boolean().optional().describe("If true, the offer requires immediate ticketing. Used for time-sensitive bookings."),
+  nonHomogeneous: z.boolean().optional().describe("If true, the offer contains mixed fare types. Used for complex pricing scenarios."),
+  oneWay: z.boolean().optional().describe("If true, this is a one-way flight. Used to determine pricing structure."),
+  isUpsellOffer: z.boolean().optional().describe("If true, this is an upsell offer. Used for premium upgrade options."),
+  lastTicketingDate: z.string().optional().describe("Last date when this offer can be ticketed (YYYY-MM-DD). Used for booking deadlines."),
+  numberOfBookableSeats: z.number().optional().describe("Number of seats available for booking. Used for availability checking."),
+  
+  // Itinerary information
+  itineraryDuration: z.string().optional().describe("Total duration of the itinerary (e.g., 'PT2H30M'). Used for trip planning."),
+  
+  // Flight segment details (flattened from nested structure)
+  segmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for the segment. Required for segment identification."),
+  segmentDepartureTerminal: z.string().optional().describe("Terminal at departure airport. Used for airport navigation."),
+  segmentDepartureAt: z.string().optional().describe("Departure time in ISO 8601 format. Used for scheduling."),
+  segmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for the segment. Required for segment identification."),
+  segmentArrivalTerminal: z.string().optional().describe("Terminal at arrival airport. Used for airport navigation."),
+  segmentArrivalAt: z.string().optional().describe("Arrival time in ISO 8601 format. Used for scheduling."),
+  segmentCarrierCode: z.string().optional().describe("IATA code of the operating airline. Used for airline identification."),
+  segmentNumber: z.string().optional().describe("Flight number for the segment. Used for flight identification."),
+  segmentAircraftCode: z.string().optional().describe("IATA code of the aircraft type. Used for aircraft information."),
+  segmentOperatingCarrierCode: z.string().optional().describe("IATA code of the actual operating carrier (for codeshare flights). Used for carrier identification."),
+  segmentDuration: z.string().optional().describe("Duration of the segment (e.g., 'PT2H30M'). Used for flight planning."),
+  segmentId: z.string().optional().describe("Unique identifier for the segment. Used for segment reference."),
+  segmentNumberOfStops: z.number().optional().describe("Number of stops in the segment. Used for connection information."),
+  segmentBlacklistedInEU: z.boolean().optional().describe("If true, segment is blacklisted in EU. Used for regulatory compliance."),
+  
+  // Pricing information
+  priceCurrency: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Used for price display."),
+  priceTotal: z.string().optional().describe("Total price including all taxes and fees. Used for final pricing."),
+  priceBase: z.string().optional().describe("Base fare price before taxes and fees. Used for fare breakdown."),
+  priceGrandTotal: z.string().optional().describe("Grand total price including all charges. Used for final pricing."),
+  
+  // Pricing options and preferences
+  pricingOptionsFareType: z.string().optional().describe("Type of fare (e.g., 'PUBLISHED', 'NEGOTIATED'). Used for fare classification."),
+  pricingOptionsIncludedCheckedBagsOnly: z.boolean().optional().describe("If true, only include checked bags in pricing. Used for baggage pricing."),
+  
+  // Airline validation
+  validatingAirlineCodes: z.string().optional().describe("Comma-separated list of validating airline codes. Used for fare validation."),
+  
+  // Traveler-specific pricing (flattened from nested structure)
+  travelerPricingTravelerId: z.string().optional().describe("Unique identifier for the traveler. Used for traveler-specific pricing."),
+  travelerPricingFareOption: z.string().optional().describe("Fare option for the traveler. Used for fare selection."),
+  travelerPricingTravelerType: z.string().optional().describe("Type of traveler (e.g., 'ADULT', 'CHILD', 'INFANT'). Used for age-based pricing."),
+  travelerPricingPriceCurrency: z.string().optional().describe("Currency for traveler-specific pricing. Used for individual pricing."),
+  travelerPricingPriceTotal: z.string().optional().describe("Total price for this traveler. Used for individual pricing."),
+  travelerPricingPriceBase: z.string().optional().describe("Base price for this traveler. Used for individual fare breakdown."),
+  
+  // Fare details by segment (flattened from nested structure)
+  fareDetailsSegmentId: z.string().optional().describe("Segment ID for fare details. Used to link fare details to specific segments."),
+  fareDetailsCabin: z.string().optional().describe("Cabin class for the fare (e.g., 'ECONOMY', 'BUSINESS'). Used for cabin-specific pricing."),
+  fareDetailsFareBasis: z.string().optional().describe("Fare basis code for the segment. Used for fare identification."),
+  fareDetailsBrandedFare: z.string().optional().describe("Branded fare identifier. Used for branded fare pricing."),
+  fareDetailsClass: z.string().optional().describe("Booking class for the segment. Used for class-specific pricing."),
+  fareDetailsIncludedCheckedBagsQuantity: z.number().optional().describe("Number of included checked bags. Used for baggage allowance."),
+  fareDetailsIncludedCabinBagsQuantity: z.number().optional().describe("Number of included cabin bags. Used for baggage allowance."),
+  
+  // API configuration parameters
+  include: z.string().optional().describe("Comma-separated values: 'detailed-fare-rules', 'credit-card-fees', 'bags', 'other-services'. Used to include additional pricing details."),
+  forceClass: z.boolean().optional().describe("Force usage of specific booking class. Used for class-specific pricing requests."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 }
 
 server.registerTool(
   "amadeus.v1.shopping.flight-offers.pricing",
   {
     title: "Amadeus: Flight Offers Pricing",
-    description: "Confirm pricing of a flight offer.",
+    description: "Confirm pricing of flight offers obtained from search results. Returns detailed pricing information including taxes, fees, and ancillary services. Use flight offers from the flight search API as input.",
     inputSchema: FlightOffersPricingSchema,
   },
   async (input) => {
-    const { timeoutMs, flightOffers } = input;
+    const { 
+      timeoutMs, 
+      include, 
+      forceClass,
+      // Flight offer data
+      flightOfferType,
+      flightOfferId,
+      flightOfferSource,
+      instantTicketingRequired,
+      nonHomogeneous,
+      oneWay,
+      isUpsellOffer,
+      lastTicketingDate,
+      numberOfBookableSeats,
+      // Itinerary data
+      itineraryDuration,
+      // Segment data
+      segmentDepartureIataCode,
+      segmentDepartureTerminal,
+      segmentDepartureAt,
+      segmentArrivalIataCode,
+      segmentArrivalTerminal,
+      segmentArrivalAt,
+      segmentCarrierCode,
+      segmentNumber,
+      segmentAircraftCode,
+      segmentOperatingCarrierCode,
+      segmentDuration,
+      segmentId,
+      segmentNumberOfStops,
+      segmentBlacklistedInEU,
+      // Price data
+      priceCurrency,
+      priceTotal,
+      priceBase,
+      priceGrandTotal,
+      // Pricing options
+      pricingOptionsFareType,
+      pricingOptionsIncludedCheckedBagsOnly,
+      // Validating airline codes
+      validatingAirlineCodes,
+      // Traveler pricing data
+      travelerPricingTravelerId,
+      travelerPricingFareOption,
+      travelerPricingTravelerType,
+      travelerPricingPriceCurrency,
+      travelerPricingPriceTotal,
+      travelerPricingPriceBase,
+      // Fare details by segment
+      fareDetailsSegmentId,
+      fareDetailsCabin,
+      fareDetailsFareBasis,
+      fareDetailsBrandedFare,
+      fareDetailsClass,
+      fareDetailsIncludedCheckedBagsQuantity,
+      fareDetailsIncludedCabinBagsQuantity
+    } = input;
+    
     const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Build query parameters
+    const query = {};
+    if (include) {
+      query.include = include;
+    }
+    if (forceClass !== undefined) {
+      query.forceClass = forceClass;
+    }
+    
+    // Transform flat input to nested API format
+    const flightOffer = {};
+    
+    if (flightOfferType) flightOffer.type = flightOfferType;
+    if (flightOfferId) flightOffer.id = flightOfferId;
+    if (flightOfferSource) flightOffer.source = flightOfferSource;
+    if (instantTicketingRequired !== undefined) flightOffer.instantTicketingRequired = instantTicketingRequired;
+    if (nonHomogeneous !== undefined) flightOffer.nonHomogeneous = nonHomogeneous;
+    if (oneWay !== undefined) flightOffer.oneWay = oneWay;
+    if (isUpsellOffer !== undefined) flightOffer.isUpsellOffer = isUpsellOffer;
+    if (lastTicketingDate) flightOffer.lastTicketingDate = lastTicketingDate;
+    if (numberOfBookableSeats !== undefined) flightOffer.numberOfBookableSeats = numberOfBookableSeats;
+    
+    // Build itinerary if segment data is provided
+    if (segmentDepartureIataCode && segmentArrivalIataCode) {
+      const segment = {
+        departure: {
+          iataCode: segmentDepartureIataCode
+        },
+        arrival: {
+          iataCode: segmentArrivalIataCode
+        },
+        carrierCode: segmentCarrierCode,
+        number: segmentNumber,
+        duration: segmentDuration,
+        id: segmentId,
+        numberOfStops: segmentNumberOfStops || 0
+      };
+      
+      if (segmentDepartureTerminal) segment.departure.terminal = segmentDepartureTerminal;
+      if (segmentDepartureAt) segment.departure.at = segmentDepartureAt;
+      if (segmentArrivalTerminal) segment.arrival.terminal = segmentArrivalTerminal;
+      if (segmentArrivalAt) segment.arrival.at = segmentArrivalAt;
+      if (segmentAircraftCode) segment.aircraft = { code: segmentAircraftCode };
+      if (segmentOperatingCarrierCode) segment.operating = { carrierCode: segmentOperatingCarrierCode };
+      if (segmentBlacklistedInEU !== undefined) segment.blacklistedInEU = segmentBlacklistedInEU;
+      
+      flightOffer.itineraries = [{
+        duration: itineraryDuration || segmentDuration,
+        segments: [segment]
+      }];
+    }
+    
+    // Build price if provided
+    if (priceCurrency && priceTotal) {
+      flightOffer.price = {
+        currency: priceCurrency,
+        total: priceTotal,
+        base: priceBase || priceTotal
+      };
+      if (priceGrandTotal) flightOffer.price.grandTotal = priceGrandTotal;
+    }
+    
+    // Build pricing options if provided
+    if (pricingOptionsFareType || pricingOptionsIncludedCheckedBagsOnly !== undefined) {
+      flightOffer.pricingOptions = {};
+      if (pricingOptionsFareType) flightOffer.pricingOptions.fareType = [pricingOptionsFareType];
+      if (pricingOptionsIncludedCheckedBagsOnly !== undefined) flightOffer.pricingOptions.includedCheckedBagsOnly = pricingOptionsIncludedCheckedBagsOnly;
+    }
+    
+    // Build validating airline codes if provided
+    if (validatingAirlineCodes) {
+      flightOffer.validatingAirlineCodes = validatingAirlineCodes.split(',').map(code => code.trim());
+    }
+    
+    // Build traveler pricing if provided
+    if (travelerPricingTravelerId && travelerPricingTravelerType) {
+      const travelerPricing = {
+        travelerId: travelerPricingTravelerId,
+        travelerType: travelerPricingTravelerType
+      };
+      
+      if (travelerPricingFareOption) travelerPricing.fareOption = travelerPricingFareOption;
+      if (travelerPricingPriceCurrency && travelerPricingPriceTotal) {
+        travelerPricing.price = {
+          currency: travelerPricingPriceCurrency,
+          total: travelerPricingPriceTotal,
+          base: travelerPricingPriceBase || travelerPricingPriceTotal
+        };
+      }
+      
+      // Build fare details by segment if provided
+      if (fareDetailsSegmentId) {
+        const fareDetails = {
+          segmentId: fareDetailsSegmentId
+        };
+        
+        if (fareDetailsCabin) fareDetails.cabin = fareDetailsCabin;
+        if (fareDetailsFareBasis) fareDetails.fareBasis = fareDetailsFareBasis;
+        if (fareDetailsBrandedFare) fareDetails.brandedFare = fareDetailsBrandedFare;
+        if (fareDetailsClass) fareDetails.class = fareDetailsClass;
+        if (fareDetailsIncludedCheckedBagsQuantity !== undefined) {
+          fareDetails.includedCheckedBags = { quantity: fareDetailsIncludedCheckedBagsQuantity };
+        }
+        if (fareDetailsIncludedCabinBagsQuantity !== undefined) {
+          fareDetails.includedCabinBags = { quantity: fareDetailsIncludedCabinBagsQuantity };
+        }
+        
+        travelerPricing.fareDetailsBySegment = [fareDetails];
+      }
+      
+      flightOffer.travelerPricings = [travelerPricing];
+    }
+    
     const body = {
       data: {
         type: "flight-offers-pricing",
-        flightOffers: Array.isArray(flightOffers) ? flightOffers : [flightOffers],
+        flightOffers: [flightOffer]
       },
     };
+    
     const { payload, isError } = await forwardAmadeus({
       serviceName,
       apiKey,
       apiSecret,
       method: "POST",
       path: "/v1/shopping/flight-offers/pricing",
-      query: {},
+      query,
       body,
       headers: {},
       contentType: "application/json",
@@ -325,12 +579,90 @@ server.registerTool(
 
 // /v1/booking/flight-orders (POST)
 const FlightOrderCreateSchema = {
-  flightOffers: z.array(z.any()), // array of flight offers from search/pricing response
-  travelers: z.array(z.any()), // array of travelers with personal details
-  remarks: z.any().optional(),
-  ticketingAgreement: z.any().optional(),
-  contacts: z.any().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Flight offer metadata (flattened from nested structure)
+  flightOfferType: z.string().optional().describe("Type of flight offer, typically 'flight-offer'. Used to identify the offer structure."),
+  flightOfferId: z.string().optional().describe("Unique identifier for the flight offer. Used to reference specific offers."),
+  flightOfferSource: z.string().optional().describe("Source of the flight offer (e.g., 'GDS', 'LCC'). Indicates where the offer originated."),
+  instantTicketingRequired: z.boolean().optional().describe("If true, the offer requires immediate ticketing. Used for time-sensitive bookings."),
+  nonHomogeneous: z.boolean().optional().describe("If true, the offer contains mixed fare types. Used for complex pricing scenarios."),
+  oneWay: z.boolean().optional().describe("If true, this is a one-way flight. Used to determine pricing structure."),
+  isUpsellOffer: z.boolean().optional().describe("If true, this is an upsell offer. Used for premium upgrade options."),
+  lastTicketingDate: z.string().optional().describe("Last date when this offer can be ticketed (YYYY-MM-DD). Used for booking deadlines."),
+  numberOfBookableSeats: z.number().optional().describe("Number of seats available for booking. Used for availability checking."),
+  
+  // Itinerary information
+  itineraryDuration: z.string().optional().describe("Total duration of the itinerary (e.g., 'PT2H30M'). Used for trip planning."),
+  
+  // Flight segment details (flattened from nested structure)
+  segmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for the segment. Required for segment identification."),
+  segmentDepartureTerminal: z.string().optional().describe("Terminal at departure airport. Used for airport navigation."),
+  segmentDepartureAt: z.string().optional().describe("Departure time in ISO 8601 format. Used for scheduling."),
+  segmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for the segment. Required for segment identification."),
+  segmentArrivalTerminal: z.string().optional().describe("Terminal at arrival airport. Used for airport navigation."),
+  segmentArrivalAt: z.string().optional().describe("Arrival time in ISO 8601 format. Used for scheduling."),
+  segmentCarrierCode: z.string().optional().describe("IATA code of the operating airline. Used for airline identification."),
+  segmentNumber: z.string().optional().describe("Flight number for the segment. Used for flight identification."),
+  segmentAircraftCode: z.string().optional().describe("IATA code of the aircraft type. Used for aircraft information."),
+  segmentOperatingCarrierCode: z.string().optional().describe("IATA code of the actual operating carrier (for codeshare flights). Used for carrier identification."),
+  segmentDuration: z.string().optional().describe("Duration of the segment (e.g., 'PT2H30M'). Used for flight planning."),
+  segmentId: z.string().optional().describe("Unique identifier for the segment. Used for segment reference."),
+  segmentNumberOfStops: z.number().optional().describe("Number of stops in the segment. Used for connection information."),
+  segmentBlacklistedInEU: z.boolean().optional().describe("If true, segment is blacklisted in EU. Used for regulatory compliance."),
+  
+  // Pricing information
+  priceCurrency: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Used for price display."),
+  priceTotal: z.string().optional().describe("Total price including all taxes and fees. Used for final pricing."),
+  priceBase: z.string().optional().describe("Base fare price before taxes and fees. Used for fare breakdown."),
+  priceGrandTotal: z.string().optional().describe("Grand total price including all charges. Used for final pricing."),
+  
+  // Traveler information (flattened from nested structure)
+  travelerId: z.string().optional().describe("Unique identifier for the traveler. Used for traveler identification."),
+  travelerDateOfBirth: z.string().optional().describe("Traveler's date of birth in YYYY-MM-DD format. Required for age verification."),
+  travelerGender: z.string().optional().describe("Traveler's gender ('MALE', 'FEMALE', 'OTHER'). Used for passenger information."),
+  travelerFirstName: z.string().optional().describe("Traveler's first name. Required for booking and identification."),
+  travelerLastName: z.string().optional().describe("Traveler's last name. Required for booking and identification."),
+  travelerPhoneNumber: z.string().optional().describe("Traveler's phone number. Used for contact information."),
+  travelerEmail: z.string().optional().describe("Traveler's email address. Used for contact and booking confirmation."),
+  
+  // Travel document information (flattened from nested structure)
+  documentType: z.string().optional().describe("Type of travel document ('PASSPORT', 'ID_CARD', 'VISA'). Required for international travel."),
+  documentNumber: z.string().optional().describe("Document number. Required for travel document verification."),
+  documentExpiryDate: z.string().optional().describe("Document expiry date in YYYY-MM-DD format. Required for document validation."),
+  documentIssuanceCountry: z.string().optional().describe("Country code where the document was issued. Required for document validation."),
+  documentValidityCountry: z.string().optional().describe("Country code where the document is valid. Used for document validation."),
+  documentNationality: z.string().optional().describe("Nationality of the document holder. Used for passenger information."),
+  documentHolder: z.boolean().optional().describe("If true, this traveler is the document holder. Used for document association."),
+  
+  // Billing address information (flattened from nested structure)
+  billingAddressLine: z.string().optional().describe("Billing address line. Used for payment processing."),
+  billingAddressZip: z.string().optional().describe("Billing address postal code. Used for payment processing."),
+  billingAddressCountryCode: z.string().optional().describe("Billing address country code. Used for payment processing."),
+  billingAddressCityName: z.string().optional().describe("Billing address city name. Used for payment processing."),
+  
+  // Booking remarks (flattened from nested structure)
+  remarksGeneralSubType: z.string().optional().describe("Subtype of general remarks. Used for special requests."),
+  remarksGeneralText: z.string().optional().describe("General remarks text. Used for special requests and notes."),
+  
+  // Ticketing agreement (flattened from nested structure)
+  ticketingAgreementOption: z.string().optional().describe("Ticketing agreement option. Used for ticketing terms."),
+  ticketingAgreementDelay: z.string().optional().describe("Ticketing agreement delay period. Used for ticketing terms."),
+  
+  // Contact information (flattened from nested structure)
+  contactAddresseeFirstName: z.string().optional().describe("Contact person's first name. Used for booking contact."),
+  contactAddresseeLastName: z.string().optional().describe("Contact person's last name. Used for booking contact."),
+  contactCompanyName: z.string().optional().describe("Contact person's company name. Used for business bookings."),
+  contactPurpose: z.string().optional().describe("Purpose of the contact. Used for contact classification."),
+  contactPhoneDeviceType: z.string().optional().describe("Type of phone device ('MOBILE', 'LANDLINE'). Used for contact information."),
+  contactPhoneCountryCallingCode: z.string().optional().describe("Country calling code for phone number. Used for international contact."),
+  contactPhoneNumber: z.string().optional().describe("Contact phone number. Used for booking contact."),
+  contactEmail: z.string().optional().describe("Contact email address. Used for booking contact."),
+  contactAddressLines: z.string().optional().describe("Contact address lines (comma-separated). Used for contact information."),
+  contactAddressPostalCode: z.string().optional().describe("Contact address postal code. Used for contact information."),
+  contactAddressCityName: z.string().optional().describe("Contact address city name. Used for contact information."),
+  contactAddressCountryCode: z.string().optional().describe("Contact address country code. Used for contact information."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -341,16 +673,232 @@ server.registerTool(
     inputSchema: FlightOrderCreateSchema,
   },
   async (input) => {
-    const { timeoutMs, flightOffers, travelers, remarks, ticketingAgreement, contacts } = input;
+    const { 
+      timeoutMs,
+      // Flight offer data
+      flightOfferType,
+      flightOfferId,
+      flightOfferSource,
+      instantTicketingRequired,
+      nonHomogeneous,
+      oneWay,
+      isUpsellOffer,
+      lastTicketingDate,
+      numberOfBookableSeats,
+      // Itinerary data
+      itineraryDuration,
+      // Segment data
+      segmentDepartureIataCode,
+      segmentDepartureTerminal,
+      segmentDepartureAt,
+      segmentArrivalIataCode,
+      segmentArrivalTerminal,
+      segmentArrivalAt,
+      segmentCarrierCode,
+      segmentNumber,
+      segmentAircraftCode,
+      segmentOperatingCarrierCode,
+      segmentDuration,
+      segmentId,
+      segmentNumberOfStops,
+      segmentBlacklistedInEU,
+      // Price data
+      priceCurrency,
+      priceTotal,
+      priceBase,
+      priceGrandTotal,
+      // Traveler data
+      travelerId,
+      travelerDateOfBirth,
+      travelerGender,
+      travelerFirstName,
+      travelerLastName,
+      travelerPhoneNumber,
+      travelerEmail,
+      // Document data
+      documentType,
+      documentNumber,
+      documentExpiryDate,
+      documentIssuanceCountry,
+      documentValidityCountry,
+      documentNationality,
+      documentHolder,
+      // Billing address
+      billingAddressLine,
+      billingAddressZip,
+      billingAddressCountryCode,
+      billingAddressCityName,
+      // Remarks
+      remarksGeneralSubType,
+      remarksGeneralText,
+      // Ticketing agreement
+      ticketingAgreementOption,
+      ticketingAgreementDelay,
+      // Contacts
+      contactAddresseeFirstName,
+      contactAddresseeLastName,
+      contactCompanyName,
+      contactPurpose,
+      contactPhoneDeviceType,
+      contactPhoneCountryCallingCode,
+      contactPhoneNumber,
+      contactEmail,
+      contactAddressLines,
+      contactAddressPostalCode,
+      contactAddressCityName,
+      contactAddressCountryCode
+    } = input;
+    
     const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Transform flat input to nested API format
+    const flightOffer = {};
+    
+    if (flightOfferType) flightOffer.type = flightOfferType;
+    if (flightOfferId) flightOffer.id = flightOfferId;
+    if (flightOfferSource) flightOffer.source = flightOfferSource;
+    if (instantTicketingRequired !== undefined) flightOffer.instantTicketingRequired = instantTicketingRequired;
+    if (nonHomogeneous !== undefined) flightOffer.nonHomogeneous = nonHomogeneous;
+    if (oneWay !== undefined) flightOffer.oneWay = oneWay;
+    if (isUpsellOffer !== undefined) flightOffer.isUpsellOffer = isUpsellOffer;
+    if (lastTicketingDate) flightOffer.lastTicketingDate = lastTicketingDate;
+    if (numberOfBookableSeats !== undefined) flightOffer.numberOfBookableSeats = numberOfBookableSeats;
+    
+    // Build itinerary if segment data is provided
+    if (segmentDepartureIataCode && segmentArrivalIataCode) {
+      const segment = {
+        departure: {
+          iataCode: segmentDepartureIataCode
+        },
+        arrival: {
+          iataCode: segmentArrivalIataCode
+        },
+        carrierCode: segmentCarrierCode,
+        number: segmentNumber,
+        duration: segmentDuration,
+        id: segmentId,
+        numberOfStops: segmentNumberOfStops || 0
+      };
+      
+      if (segmentDepartureTerminal) segment.departure.terminal = segmentDepartureTerminal;
+      if (segmentDepartureAt) segment.departure.at = segmentDepartureAt;
+      if (segmentArrivalTerminal) segment.arrival.terminal = segmentArrivalTerminal;
+      if (segmentArrivalAt) segment.arrival.at = segmentArrivalAt;
+      if (segmentAircraftCode) segment.aircraft = { code: segmentAircraftCode };
+      if (segmentOperatingCarrierCode) segment.operating = { carrierCode: segmentOperatingCarrierCode };
+      if (segmentBlacklistedInEU !== undefined) segment.blacklistedInEU = segmentBlacklistedInEU;
+      
+      flightOffer.itineraries = [{
+        duration: itineraryDuration || segmentDuration,
+        segments: [segment]
+      }];
+    }
+    
+    // Build price if provided
+    if (priceCurrency && priceTotal) {
+      flightOffer.price = {
+        currency: priceCurrency,
+        total: priceTotal,
+        base: priceBase || priceTotal
+      };
+      if (priceGrandTotal) flightOffer.price.grandTotal = priceGrandTotal;
+    }
+    
+    // Build traveler if provided
+    const traveler = {};
+    if (travelerId) traveler.id = travelerId;
+    if (travelerDateOfBirth) traveler.dateOfBirth = travelerDateOfBirth;
+    if (travelerGender) traveler.gender = travelerGender;
+    if (travelerFirstName && travelerLastName) {
+      traveler.name = {
+        firstName: travelerFirstName,
+        lastName: travelerLastName
+      };
+    }
+    if (travelerPhoneNumber || travelerEmail) {
+      traveler.contact = {};
+      if (travelerPhoneNumber) traveler.contact.phoneNumber = travelerPhoneNumber;
+      if (travelerEmail) traveler.contact.email = travelerEmail;
+    }
+    
+    // Build document if provided
+    if (documentType && documentNumber) {
+      traveler.documents = [{
+        documentType,
+        number: documentNumber,
+        issuanceCountry: documentIssuanceCountry
+      }];
+      if (documentExpiryDate) traveler.documents[0].expiryDate = documentExpiryDate;
+      if (documentValidityCountry) traveler.documents[0].validityCountry = documentValidityCountry;
+      if (documentNationality) traveler.documents[0].nationality = documentNationality;
+      if (documentHolder !== undefined) traveler.documents[0].holder = documentHolder;
+    }
+    
+    // Build billing address if provided
+    if (billingAddressLine || billingAddressCityName) {
+      traveler.billingAddress = {};
+      if (billingAddressLine) traveler.billingAddress.line = billingAddressLine;
+      if (billingAddressZip) traveler.billingAddress.zip = billingAddressZip;
+      if (billingAddressCountryCode) traveler.billingAddress.countryCode = billingAddressCountryCode;
+      if (billingAddressCityName) traveler.billingAddress.cityName = billingAddressCityName;
+    }
+    
+    // Build remarks if provided
+    const remarks = {};
+    if (remarksGeneralText) {
+      remarks.general = [{
+        text: remarksGeneralText
+      }];
+      if (remarksGeneralSubType) remarks.general[0].subType = remarksGeneralSubType;
+    }
+    
+    // Build ticketing agreement if provided
+    const ticketingAgreement = {};
+    if (ticketingAgreementOption) {
+      ticketingAgreement.option = ticketingAgreementOption;
+      if (ticketingAgreementDelay) ticketingAgreement.delay = ticketingAgreementDelay;
+    }
+    
+    // Build contacts if provided
+    const contacts = [];
+    if (contactAddresseeFirstName && contactAddresseeLastName && contactPurpose) {
+      const contact = {
+        addresseeName: {
+          firstName: contactAddresseeFirstName,
+          lastName: contactAddresseeLastName
+        },
+        purpose: contactPurpose
+      };
+      
+      if (contactCompanyName) contact.companyName = contactCompanyName;
+      if (contactPhoneNumber) {
+        contact.phones = [{
+          deviceType: contactPhoneDeviceType || "MOBILE",
+          countryCallingCode: contactPhoneCountryCallingCode || "1",
+          number: contactPhoneNumber
+        }];
+      }
+      if (contactEmail) contact.emails = [contactEmail];
+      if (contactAddressCityName) {
+        contact.address = {
+          lines: contactAddressLines ? contactAddressLines.split(',') : [contactAddressLines],
+          cityName: contactAddressCityName,
+          countryCode: contactAddressCountryCode
+        };
+        if (contactAddressPostalCode) contact.address.postalCode = contactAddressPostalCode;
+      }
+      
+      contacts.push(contact);
+    }
+    
     const body = {
       data: {
         type: "flight-order",
-        flightOffers,
-        travelers,
-        ...(remarks ? { remarks } : {}),
-        ...(ticketingAgreement ? { ticketingAgreement } : {}),
-        ...(contacts ? { contacts } : {}),
+        flightOffers: [flightOffer],
+        travelers: [traveler],
+        ...(Object.keys(remarks).length > 0 ? { remarks } : {}),
+        ...(Object.keys(ticketingAgreement).length > 0 ? { ticketingAgreement } : {}),
+        ...(contacts.length > 0 ? { contacts } : {}),
       },
     };
 
@@ -371,7 +919,10 @@ server.registerTool(
 );
 
 // /v1/booking/flight-orders/:flightOrderId (GET)
-const FlightOrderByIdSchema = { flightOrderId: z.string().min(1), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const FlightOrderByIdSchema = { 
+  flightOrderId: z.string().min(1).describe("Unique identifier of the flight order to retrieve. Required parameter for order lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.booking.flight-orders.by-id",
@@ -412,15 +963,89 @@ server.registerTool(
     title: "Amadeus: Seatmaps",
     description: "Get seat maps for a flight offer.",
     inputSchema: {
-      // Either provide flight-orderId for GET seatmaps or provide flight offer(s) to POST
-      flightOrderId: z.string().optional(),
-      flightOffers: z.any().optional(),
-      timeoutMs: z.number().int().positive().max(60000).default(15000),
+      // Either provide flight-orderId for GET seatmaps or provide flight offer data to POST
+      flightOrderId: z.string().optional().describe("Unique identifier of an existing flight order. Used to retrieve seat maps for booked flights."),
+      
+      // Flight offer metadata (flattened from nested structure)
+      flightOfferType: z.string().optional().describe("Type of flight offer, typically 'flight-offer'. Used to identify the offer structure."),
+      flightOfferId: z.string().optional().describe("Unique identifier for the flight offer. Used to reference specific offers."),
+      flightOfferSource: z.string().optional().describe("Source of the flight offer (e.g., 'GDS', 'LCC'). Indicates where the offer originated."),
+      instantTicketingRequired: z.boolean().optional().describe("If true, the offer requires immediate ticketing. Used for time-sensitive bookings."),
+      nonHomogeneous: z.boolean().optional().describe("If true, the offer contains mixed fare types. Used for complex pricing scenarios."),
+      oneWay: z.boolean().optional().describe("If true, this is a one-way flight. Used to determine pricing structure."),
+      isUpsellOffer: z.boolean().optional().describe("If true, this is an upsell offer. Used for premium upgrade options."),
+      lastTicketingDate: z.string().optional().describe("Last date when this offer can be ticketed (YYYY-MM-DD). Used for booking deadlines."),
+      numberOfBookableSeats: z.number().optional().describe("Number of seats available for booking. Used for availability checking."),
+      
+      // Itinerary information
+      itineraryDuration: z.string().optional().describe("Total duration of the itinerary (e.g., 'PT2H30M'). Used for trip planning."),
+      
+      // Flight segment details (flattened from nested structure)
+      segmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for the segment. Required for segment identification."),
+      segmentDepartureTerminal: z.string().optional().describe("Terminal at departure airport. Used for airport navigation."),
+      segmentDepartureAt: z.string().optional().describe("Departure time in ISO 8601 format. Used for scheduling."),
+      segmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for the segment. Required for segment identification."),
+      segmentArrivalTerminal: z.string().optional().describe("Terminal at arrival airport. Used for airport navigation."),
+      segmentArrivalAt: z.string().optional().describe("Arrival time in ISO 8601 format. Used for scheduling."),
+      segmentCarrierCode: z.string().optional().describe("IATA code of the operating airline. Used for airline identification."),
+      segmentNumber: z.string().optional().describe("Flight number for the segment. Used for flight identification."),
+      segmentAircraftCode: z.string().optional().describe("IATA code of the aircraft type. Used for aircraft information."),
+      segmentOperatingCarrierCode: z.string().optional().describe("IATA code of the actual operating carrier (for codeshare flights). Used for carrier identification."),
+      segmentDuration: z.string().optional().describe("Duration of the segment (e.g., 'PT2H30M'). Used for flight planning."),
+      segmentId: z.string().optional().describe("Unique identifier for the segment. Used for segment reference."),
+      segmentNumberOfStops: z.number().optional().describe("Number of stops in the segment. Used for connection information."),
+      segmentBlacklistedInEU: z.boolean().optional().describe("If true, segment is blacklisted in EU. Used for regulatory compliance."),
+      
+      // Pricing information
+      priceCurrency: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Used for price display."),
+      priceTotal: z.string().optional().describe("Total price including all taxes and fees. Used for final pricing."),
+      priceBase: z.string().optional().describe("Base fare price before taxes and fees. Used for fare breakdown."),
+      priceGrandTotal: z.string().optional().describe("Grand total price including all charges. Used for final pricing."),
+      
+      // API configuration
+      timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
     },
   },
   async (input) => {
-    const { timeoutMs, flightOrderId, flightOffers } = input;
+    const { 
+      timeoutMs, 
+      flightOrderId,
+      // Flight offer data
+      flightOfferType,
+      flightOfferId,
+      flightOfferSource,
+      instantTicketingRequired,
+      nonHomogeneous,
+      oneWay,
+      isUpsellOffer,
+      lastTicketingDate,
+      numberOfBookableSeats,
+      // Itinerary data
+      itineraryDuration,
+      // Segment data
+      segmentDepartureIataCode,
+      segmentDepartureTerminal,
+      segmentDepartureAt,
+      segmentArrivalIataCode,
+      segmentArrivalTerminal,
+      segmentArrivalAt,
+      segmentCarrierCode,
+      segmentNumber,
+      segmentAircraftCode,
+      segmentOperatingCarrierCode,
+      segmentDuration,
+      segmentId,
+      segmentNumberOfStops,
+      segmentBlacklistedInEU,
+      // Price data
+      priceCurrency,
+      priceTotal,
+      priceBase,
+      priceGrandTotal
+    } = input;
+    
     const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
     // If flightOrderId is provided, use GET with query param as per collection example
     if (typeof flightOrderId === "string" && flightOrderId.trim()) {
       const { payload, isError } = await forwardAmadeus({
@@ -438,9 +1063,60 @@ server.registerTool(
       return { content: [{ type: "text", text: payload }], isError };
     }
 
-    // Otherwise expect flightOffers and POST body
-    const flightOffersArray = Array.isArray(flightOffers) ? flightOffers : [flightOffers];
-    const body = { data: flightOffersArray };
+    // Otherwise build flight offer from flattened data and POST
+    const flightOffer = {};
+    
+    if (flightOfferType) flightOffer.type = flightOfferType;
+    if (flightOfferId) flightOffer.id = flightOfferId;
+    if (flightOfferSource) flightOffer.source = flightOfferSource;
+    if (instantTicketingRequired !== undefined) flightOffer.instantTicketingRequired = instantTicketingRequired;
+    if (nonHomogeneous !== undefined) flightOffer.nonHomogeneous = nonHomogeneous;
+    if (oneWay !== undefined) flightOffer.oneWay = oneWay;
+    if (isUpsellOffer !== undefined) flightOffer.isUpsellOffer = isUpsellOffer;
+    if (lastTicketingDate) flightOffer.lastTicketingDate = lastTicketingDate;
+    if (numberOfBookableSeats !== undefined) flightOffer.numberOfBookableSeats = numberOfBookableSeats;
+    
+    // Build itinerary if segment data is provided
+    if (segmentDepartureIataCode && segmentArrivalIataCode) {
+      const segment = {
+        departure: {
+          iataCode: segmentDepartureIataCode
+        },
+        arrival: {
+          iataCode: segmentArrivalIataCode
+        },
+        carrierCode: segmentCarrierCode,
+        number: segmentNumber,
+        duration: segmentDuration,
+        id: segmentId,
+        numberOfStops: segmentNumberOfStops || 0
+      };
+      
+      if (segmentDepartureTerminal) segment.departure.terminal = segmentDepartureTerminal;
+      if (segmentDepartureAt) segment.departure.at = segmentDepartureAt;
+      if (segmentArrivalTerminal) segment.arrival.terminal = segmentArrivalTerminal;
+      if (segmentArrivalAt) segment.arrival.at = segmentArrivalAt;
+      if (segmentAircraftCode) segment.aircraft = { code: segmentAircraftCode };
+      if (segmentOperatingCarrierCode) segment.operating = { carrierCode: segmentOperatingCarrierCode };
+      if (segmentBlacklistedInEU !== undefined) segment.blacklistedInEU = segmentBlacklistedInEU;
+      
+      flightOffer.itineraries = [{
+        duration: itineraryDuration || segmentDuration,
+        segments: [segment]
+      }];
+    }
+    
+    // Build price if provided
+    if (priceCurrency && priceTotal) {
+      flightOffer.price = {
+        currency: priceCurrency,
+        total: priceTotal,
+        base: priceBase || priceTotal
+      };
+      if (priceGrandTotal) flightOffer.price.grandTotal = priceGrandTotal;
+    }
+    
+    const body = { data: [flightOffer] };
     const { payload, isError } = await forwardAmadeus({
       serviceName,
       apiKey,
@@ -464,10 +1140,10 @@ server.registerTool(
     title: "Amadeus: Schedules (Flights)",
     description: "Retrieve airline schedules for flights.",
     inputSchema: {
-      carrierCode: z.string(),
-      flightNumber: z.string(),
-      scheduledDepartureDate: z.string(), // YYYY-MM-DD
-      timeoutMs: z.number().int().positive().max(60000).default(15000),
+      carrierCode: z.string().describe("IATA code of the airline carrier (e.g., 'BA', 'AF', 'LH'). Required for flight schedule lookup."),
+      flightNumber: z.string().describe("Flight number (e.g., '123', '4567'). Required for flight schedule lookup."),
+      scheduledDepartureDate: z.string().describe("Scheduled departure date in YYYY-MM-DD format. Required for flight schedule lookup."),
+      timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
     },
   },
   async (input) => {
@@ -497,17 +1173,24 @@ server.registerTool(
 
 // /v1/travel/predictions/flight-delay (GET)
 const FlightDelayPredictionSchema = {
-  originLocationCode: z.string(),
-  destinationLocationCode: z.string(),
-  departureDate: z.string(), // YYYY-MM-DD
-  departureTime: z.string().optional(), // HH:MM:SS
-  arrivalDate: z.string().optional(), // YYYY-MM-DD
-  arrivalTime: z.string().optional(), // HH:MM:SS
-  aircraftCode: z.string().optional(),
-  carrierCode: z.string().optional(),
-  flightNumber: z.string().optional(),
-  duration: z.string().optional(), // ISO 8601 e.g., PT2H
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Core route information
+  originLocationCode: z.string().describe("IATA code of the departure airport or city (e.g., 'NYC', 'LAX'). Required for delay prediction."),
+  destinationLocationCode: z.string().describe("IATA code of the arrival airport or city (e.g., 'LHR', 'CDG'). Required for delay prediction."),
+  departureDate: z.string().describe("Departure date in YYYY-MM-DD format. Required for delay prediction."),
+  
+  // Optional timing details
+  departureTime: z.string().optional().describe("Departure time in HH:MM:SS format. Used for more accurate delay prediction."),
+  arrivalDate: z.string().optional().describe("Arrival date in YYYY-MM-DD format. Used for round-trip delay prediction."),
+  arrivalTime: z.string().optional().describe("Arrival time in HH:MM:SS format. Used for more accurate delay prediction."),
+  
+  // Flight-specific details
+  aircraftCode: z.string().optional().describe("IATA code of the aircraft type. Used for aircraft-specific delay patterns."),
+  carrierCode: z.string().optional().describe("IATA code of the airline carrier. Used for airline-specific delay patterns."),
+  flightNumber: z.string().optional().describe("Flight number. Used for specific flight delay prediction."),
+  duration: z.string().optional().describe("Flight duration in ISO 8601 format (e.g., 'PT2H30M'). Used for delay calculation."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -538,12 +1221,17 @@ server.registerTool(
 
 // /v1/analytics/itinerary-price-metrics (GET)
 const ItineraryPriceMetricsSchema = {
-  originIataCode: z.string(),
-  destinationIataCode: z.string(),
-  departureDate: z.string(), // YYYY-MM-DD
-  currencyCode: z.string().optional(),
-  oneWay: z.union([z.boolean(), z.string()]).optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Core route information
+  originIataCode: z.string().describe("IATA code of the departure airport or city (e.g., 'NYC', 'LAX'). Required for price metrics analysis."),
+  destinationIataCode: z.string().describe("IATA code of the arrival airport or city (e.g., 'LHR', 'CDG'). Required for price metrics analysis."),
+  departureDate: z.string().describe("Departure date in YYYY-MM-DD format. Required for price metrics analysis."),
+  
+  // Pricing and trip configuration
+  currencyCode: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Optional, defaults to USD."),
+  oneWay: z.boolean().optional().describe("If true, analyze one-way flights only. If false or omitted, includes round-trip analysis."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -574,9 +1262,52 @@ server.registerTool(
 
 // /v1/shopping/flight-offers/upselling (POST)
 const FlightOffersUpsellingSchema = {
-  flightOffers: z.any(),
-  payments: z.any().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Flight offer metadata (flattened from nested structure)
+  flightOfferType: z.string().optional().describe("Type of flight offer, typically 'flight-offer'. Used to identify the offer structure."),
+  flightOfferId: z.string().optional().describe("Unique identifier for the flight offer. Used to reference specific offers."),
+  flightOfferSource: z.string().optional().describe("Source of the flight offer (e.g., 'GDS', 'LCC'). Indicates where the offer originated."),
+  instantTicketingRequired: z.boolean().optional().describe("If true, the offer requires immediate ticketing. Used for time-sensitive bookings."),
+  nonHomogeneous: z.boolean().optional().describe("If true, the offer contains mixed fare types. Used for complex pricing scenarios."),
+  oneWay: z.boolean().optional().describe("If true, this is a one-way flight. Used to determine pricing structure."),
+  isUpsellOffer: z.boolean().optional().describe("If true, this is an upsell offer. Used for premium upgrade options."),
+  lastTicketingDate: z.string().optional().describe("Last date when this offer can be ticketed (YYYY-MM-DD). Used for booking deadlines."),
+  numberOfBookableSeats: z.number().optional().describe("Number of seats available for booking. Used for availability checking."),
+  
+  // Itinerary information
+  itineraryDuration: z.string().optional().describe("Total duration of the itinerary (e.g., 'PT2H30M'). Used for trip planning."),
+  
+  // Flight segment details (flattened from nested structure)
+  segmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for the segment. Required for segment identification."),
+  segmentDepartureTerminal: z.string().optional().describe("Terminal at departure airport. Used for airport navigation."),
+  segmentDepartureAt: z.string().optional().describe("Departure time in ISO 8601 format. Used for scheduling."),
+  segmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for the segment. Required for segment identification."),
+  segmentArrivalTerminal: z.string().optional().describe("Terminal at arrival airport. Used for airport navigation."),
+  segmentArrivalAt: z.string().optional().describe("Arrival time in ISO 8601 format. Used for scheduling."),
+  segmentCarrierCode: z.string().optional().describe("IATA code of the operating airline. Used for airline identification."),
+  segmentNumber: z.string().optional().describe("Flight number for the segment. Used for flight identification."),
+  segmentAircraftCode: z.string().optional().describe("IATA code of the aircraft type. Used for aircraft information."),
+  segmentOperatingCarrierCode: z.string().optional().describe("IATA code of the actual operating carrier (for codeshare flights). Used for carrier identification."),
+  segmentDuration: z.string().optional().describe("Duration of the segment (e.g., 'PT2H30M'). Used for flight planning."),
+  segmentId: z.string().optional().describe("Unique identifier for the segment. Used for segment reference."),
+  segmentNumberOfStops: z.number().optional().describe("Number of stops in the segment. Used for connection information."),
+  segmentBlacklistedInEU: z.boolean().optional().describe("If true, segment is blacklisted in EU. Used for regulatory compliance."),
+  
+  // Pricing information
+  priceCurrency: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Used for price display."),
+  priceTotal: z.string().optional().describe("Total price including all taxes and fees. Used for final pricing."),
+  priceBase: z.string().optional().describe("Base fare price before taxes and fees. Used for fare breakdown."),
+  priceGrandTotal: z.string().optional().describe("Grand total price including all charges. Used for final pricing."),
+  
+  // Payment information (flattened from nested structure)
+  paymentId: z.string().optional().describe("Unique identifier for the payment. Used for payment tracking."),
+  paymentMethod: z.string().optional().describe("Payment method (e.g., 'CREDIT_CARD', 'DEBIT_CARD'). Used for payment processing."),
+  paymentCardVendorCode: z.string().optional().describe("Card vendor code (e.g., 'VI', 'MC', 'AX'). Used for card validation."),
+  paymentCardNumber: z.string().optional().describe("Card number (masked). Used for payment processing."),
+  paymentCardExpiryDate: z.string().optional().describe("Card expiry date in MM/YY format. Used for card validation."),
+  paymentCardHolderName: z.string().optional().describe("Card holder's name. Used for payment verification."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -587,15 +1318,132 @@ server.registerTool(
     inputSchema: FlightOffersUpsellingSchema,
   },
   async (input) => {
+    const { 
+      timeoutMs,
+      // Flight offer data
+      flightOfferType,
+      flightOfferId,
+      flightOfferSource,
+      instantTicketingRequired,
+      nonHomogeneous,
+      oneWay,
+      isUpsellOffer,
+      lastTicketingDate,
+      numberOfBookableSeats,
+      // Itinerary data
+      itineraryDuration,
+      // Segment data
+      segmentDepartureIataCode,
+      segmentDepartureTerminal,
+      segmentDepartureAt,
+      segmentArrivalIataCode,
+      segmentArrivalTerminal,
+      segmentArrivalAt,
+      segmentCarrierCode,
+      segmentNumber,
+      segmentAircraftCode,
+      segmentOperatingCarrierCode,
+      segmentDuration,
+      segmentId,
+      segmentNumberOfStops,
+      segmentBlacklistedInEU,
+      // Price data
+      priceCurrency,
+      priceTotal,
+      priceBase,
+      priceGrandTotal,
+      // Payment data
+      paymentId,
+      paymentMethod,
+      paymentCardVendorCode,
+      paymentCardNumber,
+      paymentCardExpiryDate,
+      paymentCardHolderName
+    } = input;
+    
     const { serviceName, apiKey, apiSecret } = getEnvAuth();
-    const { timeoutMs, flightOffers, payments } = input;
+    
+    // Transform flat input to nested API format
+    const flightOffer = {};
+    
+    if (flightOfferType) flightOffer.type = flightOfferType;
+    if (flightOfferId) flightOffer.id = flightOfferId;
+    if (flightOfferSource) flightOffer.source = flightOfferSource;
+    if (instantTicketingRequired !== undefined) flightOffer.instantTicketingRequired = instantTicketingRequired;
+    if (nonHomogeneous !== undefined) flightOffer.nonHomogeneous = nonHomogeneous;
+    if (oneWay !== undefined) flightOffer.oneWay = oneWay;
+    if (isUpsellOffer !== undefined) flightOffer.isUpsellOffer = isUpsellOffer;
+    if (lastTicketingDate) flightOffer.lastTicketingDate = lastTicketingDate;
+    if (numberOfBookableSeats !== undefined) flightOffer.numberOfBookableSeats = numberOfBookableSeats;
+    
+    // Build itinerary if segment data is provided
+    if (segmentDepartureIataCode && segmentArrivalIataCode) {
+      const segment = {
+        departure: {
+          iataCode: segmentDepartureIataCode
+        },
+        arrival: {
+          iataCode: segmentArrivalIataCode
+        },
+        carrierCode: segmentCarrierCode,
+        number: segmentNumber,
+        duration: segmentDuration,
+        id: segmentId,
+        numberOfStops: segmentNumberOfStops || 0
+      };
+      
+      if (segmentDepartureTerminal) segment.departure.terminal = segmentDepartureTerminal;
+      if (segmentDepartureAt) segment.departure.at = segmentDepartureAt;
+      if (segmentArrivalTerminal) segment.arrival.terminal = segmentArrivalTerminal;
+      if (segmentArrivalAt) segment.arrival.at = segmentArrivalAt;
+      if (segmentAircraftCode) segment.aircraft = { code: segmentAircraftCode };
+      if (segmentOperatingCarrierCode) segment.operating = { carrierCode: segmentOperatingCarrierCode };
+      if (segmentBlacklistedInEU !== undefined) segment.blacklistedInEU = segmentBlacklistedInEU;
+      
+      flightOffer.itineraries = [{
+        duration: itineraryDuration || segmentDuration,
+        segments: [segment]
+      }];
+    }
+    
+    // Build price if provided
+    if (priceCurrency && priceTotal) {
+      flightOffer.price = {
+        currency: priceCurrency,
+        total: priceTotal,
+        base: priceBase || priceTotal
+      };
+      if (priceGrandTotal) flightOffer.price.grandTotal = priceGrandTotal;
+    }
+    
+    // Build payments if provided
+    const payments = [];
+    if (paymentId && paymentMethod) {
+      const payment = {
+        id: paymentId,
+        method: paymentMethod
+      };
+      
+      if (paymentCardVendorCode && paymentCardNumber) {
+        payment.card = {
+          vendorCode: paymentCardVendorCode,
+          cardNumber: paymentCardNumber,
+          expiryDate: paymentCardExpiryDate,
+          holderName: paymentCardHolderName
+        };
+      }
+      
+      payments.push(payment);
+    }
+    
     const body = {
       data: {
         type: "flight-offers-upselling",
-        flightOffers: Array.isArray(flightOffers) ? flightOffers : [flightOffers],
-        ...(payments ? { payments } : {}),
+        flightOffers: [flightOffer],
+        ...(payments.length > 0 ? { payments } : {}),
       },
     };
+    
     const { payload, isError } = await forwardAmadeus({
       serviceName,
       apiKey,
@@ -614,14 +1462,48 @@ server.registerTool(
 
 // Flight Offers Prediction (v2)
 const FlightOffersPredictionSchema = {
-  meta: {
-    count: z.number().optional(),
-    links: {
-      self: z.string().optional()
-    }
-  },
-  flightOffers: z.array(z.any()), // array of flight offers from search response
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Meta data (flattened from nested structure)
+  metaCount: z.number().optional().describe("Total count of results available. Used for pagination and result counting."),
+  metaLinksSelf: z.string().optional().describe("Self-referencing link for the current page. Used for API navigation."),
+  
+  // Flight offer metadata (flattened from nested structure)
+  flightOfferType: z.string().optional().describe("Type of flight offer, typically 'flight-offer'. Used to identify the offer structure."),
+  flightOfferId: z.string().optional().describe("Unique identifier for the flight offer. Used to reference specific offers."),
+  flightOfferSource: z.string().optional().describe("Source of the flight offer (e.g., 'GDS', 'LCC'). Indicates where the offer originated."),
+  instantTicketingRequired: z.boolean().optional().describe("If true, the offer requires immediate ticketing. Used for time-sensitive bookings."),
+  nonHomogeneous: z.boolean().optional().describe("If true, the offer contains mixed fare types. Used for complex pricing scenarios."),
+  oneWay: z.boolean().optional().describe("If true, this is a one-way flight. Used to determine pricing structure."),
+  isUpsellOffer: z.boolean().optional().describe("If true, this is an upsell offer. Used for premium upgrade options."),
+  lastTicketingDate: z.string().optional().describe("Last date when this offer can be ticketed (YYYY-MM-DD). Used for booking deadlines."),
+  numberOfBookableSeats: z.number().optional().describe("Number of seats available for booking. Used for availability checking."),
+  
+  // Itinerary information
+  itineraryDuration: z.string().optional().describe("Total duration of the itinerary (e.g., 'PT2H30M'). Used for trip planning."),
+  
+  // Flight segment details (flattened from nested structure)
+  segmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for the segment. Required for segment identification."),
+  segmentDepartureTerminal: z.string().optional().describe("Terminal at departure airport. Used for airport navigation."),
+  segmentDepartureAt: z.string().optional().describe("Departure time in ISO 8601 format. Used for scheduling."),
+  segmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for the segment. Required for segment identification."),
+  segmentArrivalTerminal: z.string().optional().describe("Terminal at arrival airport. Used for airport navigation."),
+  segmentArrivalAt: z.string().optional().describe("Arrival time in ISO 8601 format. Used for scheduling."),
+  segmentCarrierCode: z.string().optional().describe("IATA code of the operating airline. Used for airline identification."),
+  segmentNumber: z.string().optional().describe("Flight number for the segment. Used for flight identification."),
+  segmentAircraftCode: z.string().optional().describe("IATA code of the aircraft type. Used for aircraft information."),
+  segmentOperatingCarrierCode: z.string().optional().describe("IATA code of the actual operating carrier (for codeshare flights). Used for carrier identification."),
+  segmentDuration: z.string().optional().describe("Duration of the segment (e.g., 'PT2H30M'). Used for flight planning."),
+  segmentId: z.string().optional().describe("Unique identifier for the segment. Used for segment reference."),
+  segmentNumberOfStops: z.number().optional().describe("Number of stops in the segment. Used for connection information."),
+  segmentBlacklistedInEU: z.boolean().optional().describe("If true, segment is blacklisted in EU. Used for regulatory compliance."),
+  
+  // Pricing information
+  priceCurrency: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Used for price display."),
+  priceTotal: z.string().optional().describe("Total price including all taxes and fees. Used for final pricing."),
+  priceBase: z.string().optional().describe("Base fare price before taxes and fees. Used for fare breakdown."),
+  priceGrandTotal: z.string().optional().describe("Grand total price including all charges. Used for final pricing."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -632,14 +1514,110 @@ server.registerTool(
     inputSchema: FlightOffersPredictionSchema,
   },
   async (input) => {
-    const { timeoutMs, meta, flightOffers } = input;
+    const { 
+      timeoutMs,
+      // Meta data
+      metaCount,
+      metaLinksSelf,
+      // Flight offer data
+      flightOfferType,
+      flightOfferId,
+      flightOfferSource,
+      instantTicketingRequired,
+      nonHomogeneous,
+      oneWay,
+      isUpsellOffer,
+      lastTicketingDate,
+      numberOfBookableSeats,
+      // Itinerary data
+      itineraryDuration,
+      // Segment data
+      segmentDepartureIataCode,
+      segmentDepartureTerminal,
+      segmentDepartureAt,
+      segmentArrivalIataCode,
+      segmentArrivalTerminal,
+      segmentArrivalAt,
+      segmentCarrierCode,
+      segmentNumber,
+      segmentAircraftCode,
+      segmentOperatingCarrierCode,
+      segmentDuration,
+      segmentId,
+      segmentNumberOfStops,
+      segmentBlacklistedInEU,
+      // Price data
+      priceCurrency,
+      priceTotal,
+      priceBase,
+      priceGrandTotal
+    } = input;
+    
     const { serviceName, apiKey, apiSecret } = getEnvAuth();
+    
+    // Build meta if provided
+    const meta = {};
+    if (metaCount !== undefined) meta.count = metaCount;
+    if (metaLinksSelf) meta.links = { self: metaLinksSelf };
+    
+    // Transform flat input to nested API format
+    const flightOffer = {};
+    
+    if (flightOfferType) flightOffer.type = flightOfferType;
+    if (flightOfferId) flightOffer.id = flightOfferId;
+    if (flightOfferSource) flightOffer.source = flightOfferSource;
+    if (instantTicketingRequired !== undefined) flightOffer.instantTicketingRequired = instantTicketingRequired;
+    if (nonHomogeneous !== undefined) flightOffer.nonHomogeneous = nonHomogeneous;
+    if (oneWay !== undefined) flightOffer.oneWay = oneWay;
+    if (isUpsellOffer !== undefined) flightOffer.isUpsellOffer = isUpsellOffer;
+    if (lastTicketingDate) flightOffer.lastTicketingDate = lastTicketingDate;
+    if (numberOfBookableSeats !== undefined) flightOffer.numberOfBookableSeats = numberOfBookableSeats;
+    
+    // Build itinerary if segment data is provided
+    if (segmentDepartureIataCode && segmentArrivalIataCode) {
+      const segment = {
+        departure: {
+          iataCode: segmentDepartureIataCode
+        },
+        arrival: {
+          iataCode: segmentArrivalIataCode
+        },
+        carrierCode: segmentCarrierCode,
+        number: segmentNumber,
+        duration: segmentDuration,
+        id: segmentId,
+        numberOfStops: segmentNumberOfStops || 0
+      };
+      
+      if (segmentDepartureTerminal) segment.departure.terminal = segmentDepartureTerminal;
+      if (segmentDepartureAt) segment.departure.at = segmentDepartureAt;
+      if (segmentArrivalTerminal) segment.arrival.terminal = segmentArrivalTerminal;
+      if (segmentArrivalAt) segment.arrival.at = segmentArrivalAt;
+      if (segmentAircraftCode) segment.aircraft = { code: segmentAircraftCode };
+      if (segmentOperatingCarrierCode) segment.operating = { carrierCode: segmentOperatingCarrierCode };
+      if (segmentBlacklistedInEU !== undefined) segment.blacklistedInEU = segmentBlacklistedInEU;
+      
+      flightOffer.itineraries = [{
+        duration: itineraryDuration || segmentDuration,
+        segments: [segment]
+      }];
+    }
+    
+    // Build price if provided
+    if (priceCurrency && priceTotal) {
+      flightOffer.price = {
+        currency: priceCurrency,
+        total: priceTotal,
+        base: priceBase || priceTotal
+      };
+      if (priceGrandTotal) flightOffer.price.grandTotal = priceGrandTotal;
+    }
     
     // Transform input to correct Amadeus format
     const body = {
       data: {
-        meta,
-        data: flightOffers
+        ...(Object.keys(meta).length > 0 ? { meta } : {}),
+        data: [flightOffer]
       }
     };
     
@@ -660,7 +1638,13 @@ server.registerTool(
 );
 
 // /v1/travel/predictions/trip-purpose (GET)
-const TripPurposeSchema = { originLocationCode: z.string(), destinationLocationCode: z.string(), departureDate: z.string(), returnDate: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const TripPurposeSchema = { 
+  originLocationCode: z.string().describe("IATA code of the departure airport or city (e.g., 'NYC', 'LAX'). Required for trip purpose prediction."),
+  destinationLocationCode: z.string().describe("IATA code of the arrival airport or city (e.g., 'LHR', 'CDG'). Required for trip purpose prediction."),
+  departureDate: z.string().describe("Departure date in YYYY-MM-DD format. Required for trip purpose prediction."),
+  returnDate: z.string().optional().describe("Return date in YYYY-MM-DD format. Optional for round-trip trip purpose prediction."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.")
+};
 
 server.registerTool(
   "amadeus.v1.travel.predictions.trip-purpose",
@@ -695,15 +1679,24 @@ server.registerTool(
 
 // /v1/shopping/flight-destinations (GET)
 const FlightDestinationsSchema = {
-  origin: z.string(), // IATA code of departure city/airport (required)
-  departureDate: z.string().optional(), // YYYY-MM-DD format
-  oneWay: z.boolean().optional(),
-  duration: z.number().optional(),
-  nonStop: z.boolean().optional(),
-  viewBy: z.enum(["DATE", "DURATION"]).optional(),
-  maxPrice: z.number().optional(),
-  currencyCode: z.string().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Core search parameters
+  origin: z.string().describe("IATA code of departure city or airport (e.g., 'NYC', 'LAX'). Required for destination search."),
+  departureDate: z.string().optional().describe("Departure date in YYYY-MM-DD format. Optional for flexible date search."),
+  
+  // Trip configuration
+  oneWay: z.boolean().optional().describe("If true, search for one-way flights only. If false or omitted, includes round-trip options."),
+  duration: z.number().optional().describe("Trip duration in days. Used to find return dates for round-trip searches."),
+  
+  // Flight preferences
+  nonStop: z.boolean().optional().describe("If true, only return non-stop flights. Optional filter for direct flights only."),
+  viewBy: z.enum(["DATE", "DURATION"]).optional().describe("Sort results by 'DATE' (chronological) or 'DURATION' (shortest first). Optional sorting."),
+  
+  // Price filtering
+  maxPrice: z.number().optional().describe("Maximum price limit for destinations. Used to filter results by budget."),
+  currencyCode: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Optional, defaults to USD."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -734,57 +1727,59 @@ server.registerTool(
 
 // /v1/shopping/availability/flight-availabilities (POST)
 const FlightAvailabilitiesSchema = {
-  // Origin Destination fields
-  originDestinationId: z.string().optional(),
-  originLocationCode: z.string().optional(),
-  destinationLocationCode: z.string().optional(),
-  departureDate: z.string().optional(), // YYYY-MM-DD format
-  departureTime: z.string().optional(), // HH:MM:SS format
-  arrivalDate: z.string().optional(), // YYYY-MM-DD format
-  arrivalTime: z.string().optional(), // HH:MM:SS format
+  // Origin Destination fields (first route)
+  originDestinationId: z.string().optional().describe("Unique identifier for the origin-destination pair. Used for multi-route searches."),
+  originLocationCode: z.string().optional().describe("IATA code of departure airport or city (e.g., 'NYC', 'LAX'). Required for availability search."),
+  destinationLocationCode: z.string().optional().describe("IATA code of arrival airport or city (e.g., 'LHR', 'CDG'). Required for availability search."),
+  departureDate: z.string().optional().describe("Departure date in YYYY-MM-DD format. Required for availability search."),
+  departureTime: z.string().optional().describe("Departure time in HH:MM:SS format. Used for time-specific availability."),
+  arrivalDate: z.string().optional().describe("Arrival date in YYYY-MM-DD format. Used for round-trip availability."),
+  arrivalTime: z.string().optional().describe("Arrival time in HH:MM:SS format. Used for time-specific availability."),
   
-  // Traveler fields
-  travelerId: z.string().optional(),
-  travelerType: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  // Traveler fields (first traveler)
+  travelerId: z.string().optional().describe("Unique identifier for the traveler. Used for traveler-specific pricing."),
+  travelerType: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of traveler. Used for age-based pricing and availability."),
   
-  // Additional traveler fields for multiple travelers
-  travelerId2: z.string().optional(),
-  travelerType2: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId3: z.string().optional(),
-  travelerType3: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId4: z.string().optional(),
-  travelerType4: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId5: z.string().optional(),
-  travelerType5: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId6: z.string().optional(),
-  travelerType6: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId7: z.string().optional(),
-  travelerType7: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId8: z.string().optional(),
-  travelerType8: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
-  travelerId9: z.string().optional(),
-  travelerType9: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional(),
+  // Additional traveler fields for multiple travelers (2-9)
+  travelerId2: z.string().optional().describe("Unique identifier for the second traveler. Used for multi-traveler bookings."),
+  travelerType2: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the second traveler. Used for age-based pricing."),
+  travelerId3: z.string().optional().describe("Unique identifier for the third traveler. Used for multi-traveler bookings."),
+  travelerType3: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the third traveler. Used for age-based pricing."),
+  travelerId4: z.string().optional().describe("Unique identifier for the fourth traveler. Used for multi-traveler bookings."),
+  travelerType4: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the fourth traveler. Used for age-based pricing."),
+  travelerId5: z.string().optional().describe("Unique identifier for the fifth traveler. Used for multi-traveler bookings."),
+  travelerType5: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the fifth traveler. Used for age-based pricing."),
+  travelerId6: z.string().optional().describe("Unique identifier for the sixth traveler. Used for multi-traveler bookings."),
+  travelerType6: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the sixth traveler. Used for age-based pricing."),
+  travelerId7: z.string().optional().describe("Unique identifier for the seventh traveler. Used for multi-traveler bookings."),
+  travelerType7: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the seventh traveler. Used for age-based pricing."),
+  travelerId8: z.string().optional().describe("Unique identifier for the eighth traveler. Used for multi-traveler bookings."),
+  travelerType8: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the eighth traveler. Used for age-based pricing."),
+  travelerId9: z.string().optional().describe("Unique identifier for the ninth traveler. Used for multi-traveler bookings."),
+  travelerType9: z.enum(["ADULT", "CHILD", "INFANT", "SENIOR", "YOUTH", "HELD_INFANT", "SEATED_INFANT", "STUDENT"]).optional().describe("Type of the ninth traveler. Used for age-based pricing."),
   
-  // Additional origin destination fields for multiple routes
-  originDestinationId2: z.string().optional(),
-  originLocationCode2: z.string().optional(),
-  destinationLocationCode2: z.string().optional(),
-  departureDate2: z.string().optional(),
-  departureTime2: z.string().optional(),
-  arrivalDate2: z.string().optional(),
-  arrivalTime2: z.string().optional(),
+  // Additional origin destination fields for multiple routes (second route)
+  originDestinationId2: z.string().optional().describe("Unique identifier for the second origin-destination pair. Used for multi-route searches."),
+  originLocationCode2: z.string().optional().describe("IATA code of departure airport for the second route. Used for multi-route searches."),
+  destinationLocationCode2: z.string().optional().describe("IATA code of arrival airport for the second route. Used for multi-route searches."),
+  departureDate2: z.string().optional().describe("Departure date for the second route in YYYY-MM-DD format. Used for multi-route searches."),
+  departureTime2: z.string().optional().describe("Departure time for the second route in HH:MM:SS format. Used for multi-route searches."),
+  arrivalDate2: z.string().optional().describe("Arrival date for the second route in YYYY-MM-DD format. Used for multi-route searches."),
+  arrivalTime2: z.string().optional().describe("Arrival time for the second route in HH:MM:SS format. Used for multi-route searches."),
+  
+  // API configuration and filtering
+  sources: z.array(z.enum(["GDS", "LCC"])).optional().describe("Data sources to search: 'GDS' (Global Distribution System) or 'LCC' (Low Cost Carrier). Used to filter search sources."),
+  currencyCode: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Optional, defaults to USD."),
+  maxFlightOffers: z.number().int().positive().optional().describe("Maximum number of flight offers to return. Used to limit search results."),
+  excludedCarrierCodes: z.array(z.string()).optional().describe("Array of airline codes to exclude from search. Used to filter out specific airlines."),
+  includedCarrierCodes: z.array(z.string()).optional().describe("Array of airline codes to include in search. Used to filter for specific airlines."),
+  nonStopPreferred: z.boolean().optional().describe("If true, prefer non-stop flights. Used for direct flight preference."),
+  airportChangeAllowed: z.boolean().optional().describe("If true, allow airport changes during connections. Used for connection flexibility."),
+  technicalStopsAllowed: z.boolean().optional().describe("If true, allow technical stops. Used for flight routing flexibility."),
+  maxNumberOfConnections: z.number().int().min(0).optional().describe("Maximum number of connections allowed. Used to limit flight complexity."),
   
   // API configuration
-  sources: z.array(z.enum(["GDS", "LCC"])).optional(),
-  currencyCode: z.string().optional(),
-  maxFlightOffers: z.number().int().positive().optional(),
-  excludedCarrierCodes: z.array(z.string()).optional(),
-  includedCarrierCodes: z.array(z.string()).optional(),
-  nonStopPreferred: z.boolean().optional(),
-  airportChangeAllowed: z.boolean().optional(),
-  technicalStopsAllowed: z.boolean().optional(),
-  maxNumberOfConnections: z.number().int().min(0).optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -997,9 +1992,9 @@ server.registerTool(
 
 // /v1/reference-data/recommended-locations (GET)
 const RecommendedLocationsSchema = {
-  cityCodes: z.string(), // comma-separated
-  travelerCountryCode: z.string(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  cityCodes: z.string().describe("Comma-separated list of city IATA codes (e.g., 'NYC,LAX,LHR'). Required for location recommendations."),
+  travelerCountryCode: z.string().describe("ISO 3166-1 alpha-2 country code of the traveler (e.g., 'US', 'GB'). Required for personalized recommendations."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -1030,9 +2025,9 @@ server.registerTool(
 
 // /v1/airport/predictions/on-time (GET)
 const AirportOnTimePredictionSchema = {
-  airportCode: z.string(),
-  date: z.string(), // YYYY-MM-DD
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  airportCode: z.string().describe("IATA code of the airport (e.g., 'JFK', 'LAX', 'LHR'). Required for on-time prediction."),
+  date: z.string().describe("Date in YYYY-MM-DD format. Required for on-time prediction."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -1063,12 +2058,12 @@ server.registerTool(
 
 // /v1/reference-data/locations (GET)
 const LocationsSearchSchema = {
-  keyword: z.string().optional(),
-  subType: z.string().optional(), // e.g., CITY,AIRPORT
-  countryCode: z.string().optional(), // ISO 3166-1 alpha-2 country code
-  sort: z.string().optional(), // Sort by traveler traffic
-  view: z.string().optional(), // LIGHT or FULL
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  keyword: z.string().optional().describe("Search keyword for location name (e.g., 'New York', 'London'). Used for location search."),
+  subType: z.string().optional().describe("Location sub-type filter: 'CITY', 'AIRPORT', or comma-separated list. Used to filter location types."),
+  countryCode: z.string().optional().describe("ISO 3166-1 alpha-2 country code (e.g., 'US', 'GB'). Used to filter locations by country."),
+  sort: z.string().optional().describe("Sort order for results: 'RELEVANCE', 'TRAVELER_TRAFFIC'. Used for result ordering."),
+  view: z.string().optional().describe("Response detail level: 'LIGHT' (basic info) or 'FULL' (complete info). Used to control response size."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -1098,7 +2093,10 @@ server.registerTool(
 );
 
 // /v1/reference-data/locations/CMUC (GET)
-const LocationByIdSchema = { locationId: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const LocationByIdSchema = { 
+  locationId: z.string().describe("Unique identifier of the location (e.g., 'CMUC', 'NYC'). Required for location details lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.reference-data.locations.by-id",
@@ -1129,9 +2127,9 @@ server.registerTool(
 
 // /v1/reference-data/locations/airports (GET)
 const AirportsByLocationSchema = { 
-  latitude: z.union([z.number(), z.string()]), 
-  longitude: z.union([z.number(), z.string()]), 
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  latitude: z.number().describe("Latitude coordinate (e.g., 40.7128, -74.0060). Required for airport search by location."), 
+  longitude: z.number().describe("Longitude coordinate (e.g., 40.7128, -74.0060). Required for airport search by location."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1162,9 +2160,9 @@ server.registerTool(
 
 // /v1/airport/direct-destinations (GET)
 const AirportDirectDestinationsSchema = { 
-  departureAirportCode: z.string(), 
-  max: z.union([z.number(), z.string()]).optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  departureAirportCode: z.string().describe("IATA code of the departure airport (e.g., 'JFK', 'LAX'). Required for direct destinations lookup."), 
+  max: z.number().optional().describe("Maximum number of destinations to return. Used to limit search results."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1194,7 +2192,10 @@ server.registerTool(
 );
 
 // /v2/reference-data/urls/checkin-links (GET)
-const CheckinLinksSchema = { airlineCode: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const CheckinLinksSchema = { 
+  airlineCode: z.string().describe("IATA code of the airline (e.g., 'BA', 'AF', 'LH'). Required for check-in links lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v2.reference-data.urls.checkin-links",
@@ -1223,7 +2224,10 @@ server.registerTool(
 );
 
 // /v1/reference-data/airlines (GET)
-const AirlinesSchema = { airlineCodes: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const AirlinesSchema = { 
+  airlineCodes: z.string().describe("Comma-separated list of airline IATA codes (e.g., 'BA,AF,LH'). Required for airline information lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.reference-data.airlines",
@@ -1253,10 +2257,10 @@ server.registerTool(
 
 // /v1/airline/destinations (GET)
 const AirlineDestinationsSchema = { 
-  airlineCode: z.string(), 
-  max: z.union([z.number(), z.string()]).optional(),
-  includeIndirect: z.union([z.boolean(), z.string()]).optional(), 
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  airlineCode: z.string().describe("IATA code of the airline (e.g., 'BA', 'AF', 'LH'). Required for airline destinations lookup."), 
+  max: z.number().optional().describe("Maximum number of destinations to return. Used to limit search results."),
+  includeIndirect: z.boolean().optional().describe("If true, include indirect destinations (via connections). Used for comprehensive destination search."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1291,7 +2295,13 @@ server.registerTool(
  **********************************/
 
 // /v1/shopping/activities (GET)
-const ActivitiesSearchSchema = { latitude: z.union([z.number(), z.string()]).optional(), longitude: z.union([z.number(), z.string()]).optional(), radius: z.union([z.number(), z.string()]).optional(), cityCode: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const ActivitiesSearchSchema = { 
+  latitude: z.number().optional().describe("Latitude coordinate for location-based search (e.g., 40.7128). Used for geographic activity search."), 
+  longitude: z.number().optional().describe("Longitude coordinate for location-based search (e.g., -74.0060). Used for geographic activity search."), 
+  radius: z.number().optional().describe("Search radius in kilometers from the specified location. Used to limit search area."), 
+  cityCode: z.string().optional().describe("IATA city code for city-based search (e.g., 'NYC', 'LON'). Used for city-specific activity search."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.shopping.activities",
@@ -1320,7 +2330,10 @@ server.registerTool(
 );
 
 // /v1/shopping/activities/4615 (GET)
-const ActivityByIdSchema = { activityId: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const ActivityByIdSchema = { 
+  activityId: z.string().describe("Unique identifier of the activity (e.g., '4615'). Required for activity details lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.shopping.activities.by-id",
@@ -1350,7 +2363,13 @@ server.registerTool(
 );
 
 // /v1/shopping/activities/by-square (GET)
-const ActivitiesBySquareSchema = { north: z.union([z.number(), z.string()]), south: z.union([z.number(), z.string()]), east: z.union([z.number(), z.string()]), west: z.union([z.number(), z.string()]), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const ActivitiesBySquareSchema = { 
+  north: z.number().describe("Northern boundary latitude coordinate. Required for bounding box search."), 
+  south: z.number().describe("Southern boundary latitude coordinate. Required for bounding box search."), 
+  east: z.number().describe("Eastern boundary longitude coordinate. Required for bounding box search."), 
+  west: z.number().describe("Western boundary longitude coordinate. Required for bounding box search."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.shopping.activities.by-square",
@@ -1380,11 +2399,11 @@ server.registerTool(
 
 // /v1/reference-data/locations/cities (GET)
 const CitiesSchema = { 
-  keyword: z.string().optional(), 
-  countryCode: z.string().optional(), 
-  max: z.union([z.number(), z.string()]).optional(),
-  include: z.string().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  keyword: z.string().optional().describe("Search keyword for city name (e.g., 'New York', 'London'). Used for city search."), 
+  countryCode: z.string().optional().describe("ISO 3166-1 alpha-2 country code (e.g., 'US', 'GB'). Used to filter cities by country."), 
+  max: z.number().optional().describe("Maximum number of cities to return. Used to limit search results."),
+  include: z.string().optional().describe("Additional data to include in response. Used to control response detail level."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1419,21 +2438,44 @@ server.registerTool(
 
 // /v1/shopping/transfer-offers (GET)
 const TransferOffersSchema = {
-  // follow the collection: POST with body
-  startLocationCode: z.string().optional(),
-  endAddressLine: z.string().optional(),
-  endCityName: z.string().optional(),
-  endZipCode: z.string().optional(),
-  endCountryCode: z.string().optional(),
-  endName: z.string().optional(),
-  endGeoCode: z.string().optional(),
-  transferType: z.string().optional(),
-  startDateTime: z.string().optional(),
-  passengers: z.union([z.number(), z.string()]).optional(),
-  stopOvers: z.any().optional(),
-  startConnectedSegment: z.any().optional(),
-  endConnectedSegment: z.any().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  // Core transfer parameters
+  startLocationCode: z.string().optional().describe("IATA code of the starting location (e.g., 'JFK', 'LAX'). Used for transfer origin."),
+  endAddressLine: z.string().optional().describe("Address line of the destination. Used for specific address transfers."),
+  endCityName: z.string().optional().describe("City name of the destination. Used for city-based transfers."),
+  endZipCode: z.string().optional().describe("Postal code of the destination. Used for address-based transfers."),
+  endCountryCode: z.string().optional().describe("Country code of the destination. Used for international transfers."),
+  endName: z.string().optional().describe("Name of the destination (e.g., hotel name). Used for specific location transfers."),
+  endGeoCode: z.string().optional().describe("Geographic code of the destination. Used for location identification."),
+  transferType: z.string().optional().describe("Type of transfer (e.g., 'AIRPORT', 'HOTEL'). Used for transfer classification."),
+  startDateTime: z.string().optional().describe("Start date and time in ISO 8601 format. Used for transfer scheduling."),
+  passengers: z.number().optional().describe("Number of passengers. Used for capacity planning."),
+  
+  // Stopover information (flattened from nested structure)
+  stopOverDuration: z.string().optional().describe("Duration of stopover (e.g., 'PT2H30M'). Used for multi-leg transfers."),
+  stopOverLocationCode: z.string().optional().describe("IATA code of stopover location. Used for multi-leg transfers."),
+  
+  // Connected segments - start segment (flattened from nested structure)
+  startConnectedSegmentTransportationType: z.string().optional().describe("Type of transportation for start segment (e.g., 'FLIGHT', 'TRAIN'). Used for multi-modal transfers."),
+  startConnectedSegmentTransportationNumber: z.string().optional().describe("Transportation number for start segment. Used for multi-modal transfers."),
+  startConnectedSegmentDepartureUicCode: z.string().optional().describe("UIC code of departure station for start segment. Used for train connections."),
+  startConnectedSegmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for start segment. Used for flight connections."),
+  startConnectedSegmentDepartureLocalDateTime: z.string().optional().describe("Local departure date and time for start segment. Used for scheduling."),
+  startConnectedSegmentArrivalUicCode: z.string().optional().describe("UIC code of arrival station for start segment. Used for train connections."),
+  startConnectedSegmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for start segment. Used for flight connections."),
+  startConnectedSegmentArrivalLocalDateTime: z.string().optional().describe("Local arrival date and time for start segment. Used for scheduling."),
+  
+  // Connected segments - end segment (flattened from nested structure)
+  endConnectedSegmentTransportationType: z.string().optional().describe("Type of transportation for end segment (e.g., 'FLIGHT', 'TRAIN'). Used for multi-modal transfers."),
+  endConnectedSegmentTransportationNumber: z.string().optional().describe("Transportation number for end segment. Used for multi-modal transfers."),
+  endConnectedSegmentDepartureUicCode: z.string().optional().describe("UIC code of departure station for end segment. Used for train connections."),
+  endConnectedSegmentDepartureIataCode: z.string().optional().describe("IATA code of departure airport for end segment. Used for flight connections."),
+  endConnectedSegmentDepartureLocalDateTime: z.string().optional().describe("Local departure date and time for end segment. Used for scheduling."),
+  endConnectedSegmentArrivalUicCode: z.string().optional().describe("UIC code of arrival station for end segment. Used for train connections."),
+  endConnectedSegmentArrivalIataCode: z.string().optional().describe("IATA code of arrival airport for end segment. Used for flight connections."),
+  endConnectedSegmentArrivalLocalDateTime: z.string().optional().describe("Local arrival date and time for end segment. Used for scheduling."),
+  
+  // API configuration
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -1465,88 +2507,17 @@ server.registerTool(
 
 // Transfer Order Create
 const TransferOrderCreateSchema = {
-  offerId: z.string().min(1),
-  note: z.string().optional(),
-  passengers: z.array({
-    firstName: z.string(),
-    lastName: z.string(),
-    title: z.string(),
-    contacts: {
-      phoneNumber: z.string().optional(),
-      email: z.string().optional()
-    },
-    billingAddress: {
-      line: z.string().optional(),
-      zip: z.string().optional(),
-      countryCode: z.string().optional(),
-      cityName: z.string().optional()
-    }
-  }),
-  agency: {
-    contacts: z.array({
-      email: {
-        address: z.string().optional()
-      }
-    })
-  },
-  payment: {
-    methodOfPayment: z.string().optional(),
-    creditCard: {
-      number: z.string().optional(),
-      holderName: z.string().optional(),
-      vendorCode: z.string().optional(),
-      expiryDate: z.string().optional(),
-      cvv: z.string().optional()
-    }
-  },
-  extraServices: z.array({
-    code: z.string().optional(),
-    itemId: z.string().optional()
-  }),
-  equipment: z.array({
-    code: z.string().optional()
-  }),
-  corporation: {
-    address: {
-      line: z.string().optional(),
-      zip: z.string().optional(),
-      countryCode: z.string().optional(),
-      cityName: z.string().optional()
-    },
-    info: {
-      AU: z.string().optional(),
-      CE: z.string().optional()
-    }
-  },
-  startConnectedSegment: {
-    transportationType: z.string().optional(),
-    transportationNumber: z.string().optional(),
-    departure: {
-      uicCode: z.string().optional(),
-      iataCode: z.string().optional(),
-      localDateTime: z.string().optional()
-    },
-    arrival: {
-      uicCode: z.string().optional(),
-      iataCode: z.string().optional(),
-      localDateTime: z.string().optional()
-    }
-  },
-  endConnectedSegment: {
-    transportationType: z.string().optional(),
-    transportationNumber: z.string().optional(),
-    departure: {
-      uicCode: z.string().optional(),
-      iataCode: z.string().optional(),
-      localDateTime: z.string().optional()
-    },
-    arrival: {
-      uicCode: z.string().optional(),
-      iataCode: z.string().optional(),
-      localDateTime: z.string().optional()
-    }
-  },
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  offerId: z.string().min(1).describe("Unique identifier of the transfer offer. Required for transfer order creation."),
+  note: z.string().optional().describe("Additional notes for the transfer order. Used for special requests."),
+  passengers: z.array(z.any()).describe("Array of passenger information. Used for passenger details in transfer orders."),
+  agency: z.any().describe("Agency information. Used for travel agency details."),
+  payment: z.any().describe("Payment information. Used for payment processing."),
+  extraServices: z.array(z.any()).describe("Array of extra services. Used for additional service requests."),
+  equipment: z.array(z.any()).describe("Array of equipment information. Used for vehicle/equipment details."),
+  corporation: z.any().describe("Corporation information. Used for corporate bookings."),
+  startConnectedSegment: z.any().describe("Start connected segment information. Used for multi-modal transfers."),
+  endConnectedSegment: z.any().describe("End connected segment information. Used for multi-modal transfers."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -1583,9 +2554,9 @@ server.registerTool(
 
 // /v1/ordering/transfer-orders/:transferOrderId/transfers/cancellation (POST)
 const TransferOrderCancellationSchema = { 
-  transferOrderId: z.string().min(1), 
-  confirmNbr: z.string().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  transferOrderId: z.string().min(1).describe("Unique identifier of the transfer order to cancel. Required for cancellation."), 
+  confirmNbr: z.string().optional().describe("Confirmation number for the transfer order. Used for order verification."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1621,12 +2592,12 @@ server.registerTool(
 
 // /v1/travel/analytics/air-traffic/traveled (GET)
 const AirTrafficTraveledSchema = { 
-  originCityCode: z.string(), 
-  period: z.string(), 
-  sort: z.string().optional(),
-  max: z.union([z.number(), z.string()]).optional(),
-  direction: z.string().optional(), 
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  originCityCode: z.string().describe("IATA code of the origin city (e.g., 'NYC', 'LAX'). Required for air traffic analytics."), 
+  period: z.string().describe("Time period for analytics (e.g., '2017-01,2017-02'). Required for traffic analysis."), 
+  sort: z.string().optional().describe("Sort order for results. Used for result ordering."),
+  max: z.number().optional().describe("Maximum number of results to return. Used to limit search results."),
+  direction: z.string().optional().describe("Direction of travel ('ARRIVING', 'DEPARTING'). Used for traffic direction analysis."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1657,9 +2628,9 @@ server.registerTool(
 
 // /v1/travel/analytics/air-traffic/booked (GET)
 const AirTrafficBookedSchema = { 
-  originCityCode: z.string(), 
-  period: z.string(), 
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  originCityCode: z.string().describe("IATA code of the origin city (e.g., 'NYC', 'LAX'). Required for air traffic analytics."), 
+  period: z.string().describe("Time period for analytics (e.g., '2017-01,2017-02'). Required for traffic analysis."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1690,10 +2661,10 @@ server.registerTool(
 
 // /v1/travel/analytics/air-traffic/busiest-period (GET)
 const AirTrafficBusiestPeriodSchema = { 
-  cityCode: z.string().optional(), 
-  period: z.string(), 
-  direction: z.string().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  cityCode: z.string().optional().describe("IATA code of the city (e.g., 'NYC', 'LAX'). Optional for city-specific analysis."), 
+  period: z.string().describe("Time period for analytics (e.g., '2017-01,2017-02'). Required for traffic analysis."), 
+  direction: z.string().optional().describe("Direction of travel ('ARRIVING', 'DEPARTING'). Used for traffic direction analysis."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
@@ -1727,7 +2698,16 @@ server.registerTool(
  **********************************/
 
 // /v1/reference-data/locations/hotels/by-city (GET)
-const HotelsByCitySchema = { cityCode: z.string(), radius: z.union([z.number(), z.string()]).optional(), radiusUnit: z.string().optional(), chainCodes: z.string().optional(), amenities: z.string().optional(), ratings: z.string().optional(), hotelSource: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const HotelsByCitySchema = { 
+  cityCode: z.string().describe("IATA code of the city (e.g., 'NYC', 'LON'). Required for hotel search by city."), 
+  radius: z.number().optional().describe("Search radius from city center. Used to limit search area."), 
+  radiusUnit: z.string().optional().describe("Unit for radius measurement ('KM', 'MILE'). Used for radius specification."), 
+  chainCodes: z.string().optional().describe("Comma-separated list of hotel chain codes. Used to filter by hotel chains."), 
+  amenities: z.string().optional().describe("Comma-separated list of amenity codes. Used to filter by hotel amenities."), 
+  ratings: z.string().optional().describe("Comma-separated list of rating levels. Used to filter by hotel ratings."), 
+  hotelSource: z.string().optional().describe("Hotel data source filter. Used to specify data source."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotels.by-city",
@@ -1756,7 +2736,27 @@ server.registerTool(
 );
 
 // /v3/shopping/hotel-offers (GET)
-const HotelOffersSearchSchema = { hotelIds: z.string().optional(), cityCode: z.string().optional(), latitude: z.union([z.number(), z.string()]).optional(), longitude: z.union([z.number(), z.string()]).optional(), radius: z.union([z.number(), z.string()]).optional(), radiusUnit: z.string().optional(), checkInDate: z.string().optional(), checkOutDate: z.string().optional(), adults: z.union([z.number(), z.string()]).optional(), roomQuantity: z.union([z.number(), z.string()]).optional(), priceRange: z.string().optional(), currency: z.string().optional(), paymentPolicy: z.string().optional(), includeClosed: z.union([z.boolean(), z.string()]).optional(), bestRateOnly: z.union([z.boolean(), z.string()]).optional(), boardType: z.string().optional(), amenities: z.string().optional(), ratings: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const HotelOffersSearchSchema = { 
+  hotelIds: z.string().optional().describe("Comma-separated list of hotel IDs. Used to search specific hotels."), 
+  cityCode: z.string().optional().describe("IATA code of the city (e.g., 'NYC', 'LON'). Used for city-based hotel search."), 
+  latitude: z.number().optional().describe("Latitude coordinate for location-based search. Used for geographic hotel search."), 
+  longitude: z.number().optional().describe("Longitude coordinate for location-based search. Used for geographic hotel search."), 
+  radius: z.number().optional().describe("Search radius from specified location. Used to limit search area."), 
+  radiusUnit: z.string().optional().describe("Unit for radius measurement ('KM', 'MILE'). Used for radius specification."), 
+  checkInDate: z.string().optional().describe("Check-in date in YYYY-MM-DD format. Used for availability search."), 
+  checkOutDate: z.string().optional().describe("Check-out date in YYYY-MM-DD format. Used for availability search."), 
+  adults: z.number().optional().describe("Number of adult guests. Used for occupancy-based pricing."), 
+  roomQuantity: z.number().optional().describe("Number of rooms required. Used for room quantity specification."), 
+  priceRange: z.string().optional().describe("Price range filter (e.g., '100-200'). Used for budget filtering."), 
+  currency: z.string().optional().describe("Currency code for pricing (e.g., 'USD', 'EUR'). Used for price display."), 
+  paymentPolicy: z.string().optional().describe("Payment policy filter. Used for payment requirement filtering."), 
+  includeClosed: z.boolean().optional().describe("If true, include closed hotels. Used for comprehensive search."), 
+  bestRateOnly: z.boolean().optional().describe("If true, return only best rates. Used for rate optimization."), 
+  boardType: z.string().optional().describe("Board type filter (e.g., 'ROOM_ONLY', 'BREAKFAST'). Used for meal plan filtering."), 
+  amenities: z.string().optional().describe("Comma-separated list of amenity codes. Used to filter by hotel amenities."), 
+  ratings: z.string().optional().describe("Comma-separated list of rating levels. Used to filter by hotel ratings."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v3.shopping.hotel-offers",
@@ -1786,34 +2786,11 @@ server.registerTool(
 
 // /v1/booking/hotel-bookings (POST)
 const HotelBookingSchema = {
-  offerId: z.string(),
-  guests: z.array({
-    id: z.number(),
-    name: {
-      title: z.string(),
-      firstName: z.string(),
-      lastName: z.string()
-    },
-    contact: {
-      phone: z.string().optional(),
-      email: z.string().optional()
-    }
-  }),
-  payments: z.array({
-    id: z.number(),
-    method: z.string(),
-    card: {
-      vendorCode: z.string(),
-      cardNumber: z.string(),
-      expiryDate: z.string()
-    }
-  }),
-  rooms: z.array({
-    guestIds: z.array(z.number()),
-    paymentId: z.number(),
-    specialRequest: z.string().optional()
-  }),
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  offerId: z.string().describe("Unique identifier of the hotel offer. Required for hotel booking."),
+  guests: z.array(z.any()).describe("Array of guest information. Used for guest details in hotel bookings."),
+  payments: z.array(z.any()).describe("Array of payment information. Used for payment processing."),
+  rooms: z.array(z.any()).describe("Array of room information. Used for room details in hotel bookings."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -1854,7 +2831,10 @@ server.registerTool(
 );
 
 // /v1/reference-data/locations/hotels/by-hotels (GET)
-const HotelsByIdsSchema = { hotelIds: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const HotelsByIdsSchema = { 
+  hotelIds: z.string().describe("Comma-separated list of hotel IDs. Required for hotel details lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotels.by-hotels",
@@ -1883,7 +2863,14 @@ server.registerTool(
 );
 
 // /v1/reference-data/locations/hotels/by-geocode (GET)
-const HotelsByGeocodeSchema = { latitude: z.union([z.number(), z.string()]), longitude: z.union([z.number(), z.string()]), radius: z.union([z.number(), z.string()]).optional(), radiusUnit: z.string().optional(), hotelSource: z.string().optional(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const HotelsByGeocodeSchema = { 
+  latitude: z.number().describe("Latitude coordinate (e.g., 40.7128). Required for geographic hotel search."), 
+  longitude: z.number().describe("Longitude coordinate (e.g., -74.0060). Required for geographic hotel search."), 
+  radius: z.number().optional().describe("Search radius from coordinates. Used to limit search area."), 
+  radiusUnit: z.string().optional().describe("Unit for radius measurement ('KM', 'MILE'). Used for radius specification."), 
+  hotelSource: z.string().optional().describe("Hotel data source filter. Used to specify data source."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v1.reference-data.locations.hotels.by-geocode",
@@ -1912,7 +2899,10 @@ server.registerTool(
 );
 
 // /v3/shopping/hotel-offers/:hotelOfferId (GET)
-const HotelOfferByIdSchema = { hotelOfferId: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const HotelOfferByIdSchema = { 
+  hotelOfferId: z.string().describe("Unique identifier of the hotel offer. Required for hotel offer details lookup."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v3.shopping.hotel-offers.by-id",
@@ -1943,38 +2933,12 @@ server.registerTool(
 
 // Hotel Orders
 const HotelOrdersSchema = {
-  type: z.string(),
-  guests: z.array({
-    tid: z.number(),
-    title: z.string(),
-    firstName: z.string(),
-    lastName: z.string(),
-    phone: z.string().optional(),
-    email: z.string().optional()
-  }),
-  travelAgent: {
-    contact: {
-      email: z.string().optional()
-    }
-  },
-  roomAssociations: z.array({
-    guestReferences: z.array({
-      guestReference: z.string()
-    }),
-    hotelOfferId: z.string()
-  }),
-  payment: {
-    method: z.string(),
-    paymentCard: {
-      paymentCardInfo: {
-        vendorCode: z.string(),
-        cardNumber: z.string(),
-        expiryDate: z.string(),
-        holderName: z.string()
-      }
-    }
-  },
-  timeoutMs: z.number().int().positive().max(60000).default(15000),
+  type: z.string().describe("Type of hotel order. Required for hotel order creation."),
+  guests: z.array(z.any()).describe("Array of guest information. Used for guest details in hotel orders."),
+  travelAgent: z.any().describe("Travel agent information. Used for agency bookings."),
+  roomAssociations: z.array(z.any()).describe("Array of room association information. Used for room assignments."),
+  payment: z.any().describe("Payment information. Used for payment processing."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms."),
 };
 
 server.registerTool(
@@ -2016,7 +2980,10 @@ server.registerTool(
 );
 
 // /v2/e-reputation/hotel-sentiments (GET)
-const HotelSentimentsSchema = { hotelIds: z.string(), timeoutMs: z.number().int().positive().max(60000).default(15000) };
+const HotelSentimentsSchema = { 
+  hotelIds: z.string().describe("Comma-separated list of hotel IDs. Required for hotel sentiment analysis."), 
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
+};
 
 server.registerTool(
   "amadeus.v2.e-reputation.hotel-sentiments",
@@ -2046,10 +3013,10 @@ server.registerTool(
 
 // /v1/reference-data/locations/hotel (GET)
 const HotelLocationSchema = { 
-  keyword: z.string().optional(), 
-  hotelId: z.string().optional(),
-  subType: z.string().optional(),
-  timeoutMs: z.number().int().positive().max(60000).default(15000) 
+  keyword: z.string().optional().describe("Search keyword for hotel name or location. Used for hotel search."), 
+  hotelId: z.string().optional().describe("Unique identifier of the hotel. Used for specific hotel lookup."),
+  subType: z.string().optional().describe("Hotel sub-type filter. Used to filter hotel types."),
+  timeoutMs: z.number().int().positive().max(60000).default(15000).describe("Request timeout in milliseconds (1-60000). Defaults to 15000ms.") 
 };
 
 server.registerTool(
